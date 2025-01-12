@@ -1,0 +1,182 @@
+"""
+Dataloaders
+
+"""
+import warnings
+warnings.filterwarnings("ignore")
+import torch
+import numpy as np
+import torch.utils.data as data
+import scipy.sparse as sp
+import gc
+import random
+from math import ceil, floor
+
+def set_seed(seed):
+    # Set seed for PyTorch
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)           # If using GPU
+    torch.cuda.manual_seed_all(seed)       # If using multi-GPU
+    # Set seed for NumPy
+    np.random.seed(seed)
+    # Set seed for Python random
+    random.seed(seed)
+    # Ensure deterministic behavior in some operations
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
+    
+
+def divide_chunks(counts, nchunks):
+    """
+    Description:
+    -------------
+        cut the count matrix into chunks by cells
+
+    Parameters:
+    -------------
+        counts: the count matrix, can be sparse csr matrix or dense matrix
+        nchunks: number of chunks
+    
+    Return:
+    -------------
+        counts_chunks: list of counts matrices with length == nchunks
+    """
+    ncells = counts.shape[0]
+    idxs = np.linspace(0, ncells, nchunks + 1)[:nchunks].astype(int)
+    counts_chunks = []
+    for i, idx in enumerate(idxs):
+        if i == len(idxs) - 1:
+            counts_chunks.append(counts[idx:, :])
+        else:
+            idx_next = idxs[i + 1]
+            counts_chunks.append(counts[idx:(idx_next), :])
+    return counts_chunks
+
+def expr_binning(counts, nbins = 50):
+    """
+    Description:
+    -------------
+        bin the count matrix according to the expression values
+
+    Parameters:
+    -------------
+        counts: the count matrix, sparse csr matrix
+        nbins: number of bins
+    
+    Return:
+    -------------
+        counts_bin: csr matrix with binned values
+    """
+    # preprocessing step, run in chunks
+    # scMulan uses the maximum expression, alternative: libsize in obs
+    max_expr = counts.max(axis = 1).toarray().squeeze()
+    bins = np.linspace(np.zeros_like(max_expr), max_expr, nbins, axis = 1)
+    # through for loop
+    counts_bin = []
+    for i in range(counts.shape[0]):
+        count_bin = np.digitize(counts[i, :].toarray(), bins[i, :], right=True)
+        counts_bin.append(count_bin)
+    counts_bin = np.vstack(counts_bin)
+    return sp.csr_matrix(counts_bin)
+
+def cell_sentance_const(counts, npads = None):
+    ncells, nfeats = counts.shape
+    if npads is None:
+        # the padded length should include at leat the cls token
+        npads = nfeats + 1
+    else:
+        assert nfeats <= npads - 1
+    # assign special token index: cls, mask, and pad token
+    # 0~nfeats-1 are gene tokens, cls is nfeats, pad is nfeats+1
+    cls_idx = nfeats
+    pad_idx = nfeats + 1
+    mask_idx = nfeats + 2
+
+    # construct cell sentence
+    # init expr as 0
+    expr_sent = np.zeros((ncells, npads))
+    # init feat as pad_idx
+    feat_sent = np.full((ncells, npads), pad_idx)
+    # fill in the cls_idx as the first of feat_sent
+    feat_sent[:, 0] = cls_idx
+
+    for i in range(ncells):
+        # use counts_bin if want interger
+        expr_i = counts[i, :].toarray().squeeze()
+        feat_i = np.arange(nfeats)[expr_i != 0]
+        # NOTE: for cls and padding, assign expr_sentence value to be 0, fine with continuous embedding, 
+        # but be careful for bin nn.embedding 
+        expr_sent[i, 1:(1 + len(feat_i))] = expr_i[expr_i != 0]
+        # 1 + len(feat_i) <= 257, NOTE: slicing will include the last one (index 256) if len(feat_i) + 1 > 256
+        feat_sent[i, 1:(1 + len(feat_i))] = feat_i
+
+    return sp.csr_matrix(expr_sent), sp.csr_matrix(feat_sent)
+
+def tokenize_expr_para(counts_norm, nbins = None, npads = None, njobs = 16, nchunks = None):
+    from multiprocessing import Pool
+    if nchunks is None:
+        nchunks = njobs
+    counts_chunks = divide_chunks(counts_norm, nchunks)
+    del counts_norm
+
+    if nbins is not None:
+        args = []
+        for chunk_i in range(len(counts_chunks)):
+            args.append((counts_chunks[chunk_i], nbins))
+
+        with Pool(processes = njobs) as pool:
+            counts_bin = pool.starmap(expr_binning, args)
+        counts_chunks = counts_bin
+    
+    args = []
+    for chunk_i in range(len(counts_chunks)):
+        args.append((counts_chunks[chunk_i], npads))
+    
+    with Pool(processes = njobs) as pool:
+        res = pool.starmap(cell_sentance_const, args)
+    
+    expr_sent = sp.vstack([x[0] for x in res])
+    feat_sent = sp.vstack([x[1] for x in res])
+
+    return expr_sent, feat_sent
+
+class sc_dataset(data.Dataset):
+    def __init__(self, expr_path, gene_path, ncells, npads, labels = None, batches = None):
+        """
+        expr_path: stores the path to the expr data on disk
+        gene_path: stores the path to the gene name of cells on disk 
+        meta_path: stores the path to the meta data of cells on disk
+        """
+        super(sc_dataset, self).__init__()
+        self.ncells = ncells
+        self.npads = npads
+
+        self.expr = np.memmap(expr_path, dtype = "float32", mode = "r", shape = (self.ncells, self.npads))
+        self.gene_name = np.memmap(gene_path, dtype = "int32", mode = "r", shape = (self.ncells, self.npads))
+
+        if labels is not None:
+            assert len(labels) == ncells
+        if batches is not None:
+            assert len(batches) == ncells
+        self.labels = labels
+        self.batches = batches
+
+    def __len__(self):
+        return self.ncells
+    
+    def __getitem__(self, idx):
+        expr = torch.tensor(self.expr[idx])
+        gene = torch.tensor(self.gene_name[idx])
+
+        if self.labels is not None:
+            label = self.labels[idx]
+        else:
+            label = None
+
+        if self.batches is not None:
+            batch = self.batches[idx]
+        else:
+            batch = None
+        
+        return expr, gene, label, batch
+    
