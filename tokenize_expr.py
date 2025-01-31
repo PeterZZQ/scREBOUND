@@ -72,6 +72,37 @@ fp.flush()
 
 print("Done.")
 
+
+# In[]
+# ----------------------------------------------------------------------------
+#
+# shuffle the dataset first, prevent the overhead of shuffling the data while training
+#
+# ----------------------------------------------------------------------------
+
+np.random.seed(0)
+res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+n_mgene = 256
+meta_dict = torch.load(res_dir / f"meta_{n_mgene}.pt")
+expr_sents = np.memmap(res_dir / f"expr_sent_{n_mgene}.npz", dtype = "float32", mode = "r", shape = meta_dict["shape"])
+feat_sents = np.memmap(res_dir / f"feat_sent_{n_mgene}.npz", dtype = "int32", mode = "r", shape = meta_dict["shape"])
+
+# generate the permuted index
+permuted_idx = np.random.permutation(meta_dict["shape"][0])
+meta_dict["label"] = meta_dict["label"][permuted_idx]
+meta_dict["batch"] = meta_dict["batch"][permuted_idx]
+expr_sents = expr_sents[permuted_idx, :]
+feat_sents = feat_sents[permuted_idx, :]
+
+fp = np.memmap(res_dir / f"expr_sent_{n_mgene}_permu.npz", dtype='float32', mode='w+', shape=meta_dict["shape"])
+fp[:] = expr_sents[:]
+fp.flush()
+fp = np.memmap(res_dir / f"feat_sent_{n_mgene}_permu.npz", dtype='int32', mode='w+', shape=meta_dict["shape"])
+fp[:] = feat_sents[:]
+fp.flush()
+
+torch.save(meta_dict, f = res_dir / f"meta_{n_mgene}_permu.pt")
+
 # In[]
 # ----------------------------------------------------------------------------
 #

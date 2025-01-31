@@ -11,7 +11,6 @@ class ModelConfig:
     n_epoch: int # Number of epochs to train
     lr: float # Learning rate
     n_warmup_stp_lr: int # the number of steps for warmup of learning rate
-    d_token: int # Size of the embedding vector
     d_embed: int
     n_head: int
     d_hidden: int
@@ -19,8 +18,20 @@ class ModelConfig:
     d_output: int
     dropout: float
     mask_prob: float
+    dynamic_maskprob: bool
     lamb_kd: float
-    pretrain_path: str | None
+    lamb_sup: float
+    sup_type: str
+
+    # prediction manner
+    sample_mlm: bool
+    mlm_include_zero: bool
+
+    # paths
+    checkpoint_path: str
+    checkpoint_prefix: str
+    pretrain_path: str | None = None
+
 
 def get_default_config() -> ModelConfig:
 
@@ -36,7 +47,14 @@ def get_default_config() -> ModelConfig:
         d_output=256,
         dropout=0.05,
         mask_prob=0.15,
-        lamb_kd=0.0
+        dynamic_maskprob=False,
+        lamb_kd=0.0,
+        lamb_sup=1.0,
+        sample_mlm=False,
+        mlm_include_zero=False,
+        checkpoint_path="checkpoint/",
+        checkpoint_prefix="checkpoint",
+        sup_type="classifier"
     )
 
 
@@ -72,19 +90,18 @@ class TransformerModel(nn.Module):
         self.model_type = 'Transformer'
         self.model_config = model_config
         self.device = device
-        
-        # assign the index of the special token, hardcoded
-        self.cls_idx = token_embed.shape[0] - 3
-        self.pad_idx = token_embed.shape[0] - 2
-        self.mask_idx = token_embed.shape[0] - 1
-        self.gene_idx = torch.arange(token_embed.shape[0] - 3).to(self.device)
-
 
         # conditions
         self.n_batch = n_batch
         self.n_label = n_label
 
         self.n_tokens, self.n_token_dims = token_embed.shape
+
+        # assign the index of the special token, hardcoded
+        self.cls_idx = self.n_tokens - 3
+        self.pad_idx = self.n_tokens - 2
+        self.mask_idx = self.n_tokens - 1
+        self.gene_idx = torch.arange(self.n_tokens - 3).to(self.device)
 
         # store the token embedding, of the shape (ntokens, n_token_dims)
         self.token_embed = nn.Embedding.from_pretrained(token_embed)
@@ -113,25 +130,38 @@ class TransformerModel(nn.Module):
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, model_config.n_layer)
 
         # transform the output of the transformer m_embed -> output_dim
-        self.decoder = nn.Sequential(full_block(self.model_config.d_embed, 1024, self.model_config.dropout),
-                                     full_block(1024, self.model_config.d_output, self.model_config.dropout),
+        self.decoder = nn.Sequential(full_block(self.model_config.d_embed, 256, self.model_config.dropout),
+                                     full_block(256, self.model_config.d_output, self.model_config.dropout),
                                      full_block(self.model_config.d_output, self.model_config.d_output, self.model_config.dropout),
                                      nn.Linear(self.model_config.d_output, self.model_config.d_output))
         
-        # expr_predictor: predict the masked out expression values from cell embedding and gene token
-        # cell embedding (batch, output_dim), gene_token (batch, n_token_dims) is the condition
-        self.expr_predictor = nn.Sequential(
-            full_block(self.model_config.d_output + self.model_config.d_embed + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
-            full_block(2048, 512, self.model_config.dropout),
-            full_block(512, 128, self.model_config.dropout),
-            nn.Linear(128, 1)
-        )
+        if model_config.sample_mlm:
+            # expr_predictor: predict the masked out expression values from cell embedding and gene token
+            # cell embedding (batch, output_dim), gene_token (batch, n_token_dims) is the condition
+            self.expr_predictor = nn.Sequential(
+                full_block(self.model_config.d_output + self.model_config.d_embed + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
+                full_block(2048, 512, self.model_config.dropout),
+                full_block(512, 128, self.model_config.dropout),
+                nn.Linear(128, 1)
+            )
+        else:
+            # predict the expression of all meta-genes (mse only calculated on mask)
+            self.expr_predictor = nn.Sequential(
+                full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
+                full_block(2048, 512, self.model_config.dropout),
+                full_block(512, 128, self.model_config.dropout),
+                nn.Linear(128, self.n_tokens - 1) # remove the masked token (not in the original gene sentance)
+            )
 
-        self.classifier = nn.Sequential(
-            full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
-            full_block(2048, 512, self.model_config.dropout),
-            nn.Linear(512, self.n_label)            
-        )
+        if model_config.sup_type == "classifier":
+            self.classifier = nn.Sequential(
+                # full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
+                full_block(self.model_config.d_output, 2048, self.model_config.dropout), # no batch condition
+                full_block(2048, 512, self.model_config.dropout),
+                nn.Linear(512, self.n_label)            
+            )
+        else:
+            self.classifier = None
 
         if teacher_params is not None:
             self.teacher_encoder = nn.Linear(sum(teacher_params["teacher_dims"]), self.model_config.d_output)
@@ -155,9 +185,10 @@ class TransformerModel(nn.Module):
         # sample mask using bernoulli
         mask = torch.bernoulli(mask_prob).bool()
 
+        # only place where mask_idx is used
         gene_sent_wmask = gene_sent.long()
         gene_sent_wmask[mask] = self.mask_idx
-        expr_sent_wmask = expr_sent
+        expr_sent_wmask = expr_sent.clone()
         expr_sent_wmask[mask] = 0 # NOTE: no other genes have 0 expression in the sentence, except for the padding
 
         # obtain the gene name embedding given the gene sentence, (n_batchs, n_tokens, n_token_dims)
@@ -189,18 +220,19 @@ class TransformerModel(nn.Module):
 
     def predict_expr(self, cell_embed, gene_cond, batch_cond):
         # obtain the gene name embedding given the gene_cond
-        gene_embed = self.token_embed(gene_cond)
-        gene_embed = self.gene_encoder(gene_embed) * math.sqrt(self.model_config.d_embed)
-        batch_embed = one_hot(batch_cond.reshape(-1,1), self.n_batch)
-        expr_pred = self.expr_predictor(torch.hstack((cell_embed, gene_embed.squeeze(), batch_embed)))
+        if batch_cond is not None:
+            batch_embed = one_hot(batch_cond.reshape(-1,1), self.n_batch)
+        else:
+            # zero value for condition
+            batch_embed = torch.zeros((cell_embed.shape[0], self.n_batch)).to(self.device)
+        if self.model_config.sample_mlm:
+            gene_embed = self.token_embed(gene_cond)
+            gene_embed = self.gene_encoder(gene_embed) * math.sqrt(self.model_config.d_embed)
+            expr_pred = self.expr_predictor(torch.hstack((cell_embed, gene_embed.squeeze(), batch_embed)))
+        else:
+            expr_pred = self.expr_predictor(torch.hstack((cell_embed, batch_embed)))
         return expr_pred
 
-    def predict_label(self, cell_embed, batch_cond):
-        batch_embed = one_hot(batch_cond.reshape(-1,1), self.n_batch)
-        label_pred = self.classifier(torch.hstack((cell_embed, batch_embed)))
-        return label_pred
-
-    
 
 
     def KD_loss(self, student_embed, teacher_embeds):
@@ -214,13 +246,3 @@ class TransformerModel(nn.Module):
         # mse between teacher embed and student embed
         loss_kd = nn.MSELoss()
         return loss_kd(teacher_embed, student_embed)
-
-    def classi_loss(self, cell_embed, batch_cond, label_gt):
-        class_predict = self.predict_label(cell_embed, batch_cond)
-        loss_classi = nn.CrossEntropyLoss()
-        return loss_classi(class_predict, label_gt)
-    
-    def expr_predict_loss(self, cell_embed, gene_cond, batch_cond, expr_gt):
-        expr_pred = self.predict_expr(cell_embed, gene_cond, batch_cond)
-        loss_pred = nn.MSELoss()
-        return expr_pred, loss_pred(expr_pred, expr_gt)

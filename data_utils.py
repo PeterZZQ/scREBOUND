@@ -179,4 +179,53 @@ class sc_dataset(data.Dataset):
             batch = None
         
         return expr, gene, label, batch
+
+class sc_dataset_chunk(data.Dataset):
+    """
+    Difference compared to sc_dataset, load dataset by chunks, reduce overheads
+    """
+    def __init__(self, expr_path, gene_path, ncells, npads, labels = None, batches = None, batch_size = 128):
+        """
+        expr_path: stores the path to the expr data on disk
+        gene_path: stores the path to the gene name of cells on disk 
+        meta_path: stores the path to the meta data of cells on disk
+        """
+        super(sc_dataset_chunk, self).__init__()
+        self.ncells = ncells
+        self.npads = npads
+
+        self.expr = np.memmap(expr_path, dtype = "float32", mode = "r", shape = (self.ncells, self.npads))
+        self.gene_name = np.memmap(gene_path, dtype = "int32", mode = "r", shape = (self.ncells, self.npads))
+
+        if labels is not None:
+            assert len(labels) == ncells
+        if batches is not None:
+            assert len(batches) == ncells
+        self.labels = labels
+        self.batches = batches
+
+        self.batch_size = batch_size
+
+
+    def __len__(self):
+        # Return the number of batches
+        return (self.ncells + self.batch_size - 1) // self.batch_size
+    
+    def __getitem__(self, idx):
+
+        start_idx = idx * self.batch_size
+        end_idx = min((idx + 1) * self.batch_size, self.ncells)
+        expr = torch.tensor(self.expr[start_idx:end_idx])
+        gene = torch.tensor(self.gene_name[start_idx:end_idx])
+
+        sample = {"expr": expr, "gene": gene}
+        if self.labels is not None:
+            label = self.labels[start_idx:end_idx]
+            sample["label"] = label
+
+        if self.batches is not None:
+            batch = self.batches[start_idx:end_idx]
+            sample["batch"] = batch
+
+        return sample
     
