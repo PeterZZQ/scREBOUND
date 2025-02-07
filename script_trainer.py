@@ -12,10 +12,10 @@ import torch.distributed as dist
 from torch.utils import data
 import torch.nn as nn
 
-import data_utils
+import src.data_utils as data_utils
 from torch.utils.data.distributed import DistributedSampler
 
-from transformer_model import TransformerModel, ModelConfig, get_default_config, SupervisedContrastiveLoss
+from src.transformer_model import TransformerModel, ModelConfig, get_default_config, SupervisedContrastiveLoss
 from transformers import AdamW, get_linear_schedule_with_warmup
 
 # TODO: update to wandb

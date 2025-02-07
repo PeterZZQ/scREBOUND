@@ -2,123 +2,34 @@
 import torch
 from sklearn.neighbors import KNeighborsClassifier
 import scipy.sparse as sp
-import data_utils
+import src.data_utils as data_utils
 import anndata
 import scanpy as sc
 import numpy as np
 
-# In[]
-# TODO: Given adata,
-# 1. transform into meta-gene counts
-# 3. transform meta-gene counts into cell sentence
-
-
-def preprocess_anndata(adata, meta_embed, gene_embed_key = "esm2"):
-    """
-    Group the genes into meta-genes in adata according to meta-gene embedding
-    """
-    # NOTE: kneighbors classifier is causing all the issue. Should use the exact hard-coded assignment as described
-    knn = KNeighborsClassifier(n_neighbors = 5).fit(X = meta_embed.numpy(), y = np.arange(meta_embed.shape[0]))
-    meta_labels = knn.predict(adata.varm[gene_embed_key])
-    print(np.unique(meta_labels, return_counts = True))
-    adata.var["meta_labels"] = meta_labels
-
-    counts_meta = []
-    for label in range(meta_embed.shape[0]):
-        counts_meta.append(adata.layers["counts"][:, meta_labels == label].sum(axis = 1))
-    counts_meta = sp.csr_matrix(np.hstack(counts_meta))
-
-    adata_meta = anndata.AnnData(X = counts_meta, obs = adata.obs)
-    sc.pp.normalize_total(adata_meta, target_sum = 10e4, key_added = "libsize")
-    sc.pp.log1p(adata_meta)
-    
-    return adata_meta
-
-
-# In[]
-# read the gene protein embedding and gene & meta-gene assignment
-n_mgene = 256
-gene_embed_dict = torch.load(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/gene_embed_meta{n_mgene}.pt", weights_only = False)
-# load the cell meta-info
-meta_dict = torch.load(f"/localscratch/ziqi/localscratch_tempdata/cellxgene/meta_{n_mgene}_permu.pt")
-
-# knn classifier meta-gene embedding
-meta_embed = gene_embed_dict["meta_embed"]
-# the gene embed here only include the preprocessed 4k genes in training data
-gene_embed = gene_embed_dict["gene_embed"]
-gene2meta_labels = gene_embed_dict["labels"]
-
-# gene embed full
-gene_embed_full = torch.load("/project/zzhang834/llm_dataset/proteome/embeddings/Homo_sapiens.GRCh38.gene_symbol_to_embedding_ESM2.pt", weights_only = False)
-
-# In[]
-adata_test = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/blood/partition_10.h5ad")
-adata_test.layers["counts"] = adata_test.X.copy()
-
-adata_test.var.index = adata_test.var["feature_id"].values
-adata_test = adata_test[:, [x for x in gene_embed_dict["gene_embed"].keys()]]
-
-counts_meta = []
-for label in range(n_mgene):
-    counts_meta.append(adata_test.X[:, gene_embed_dict["labels"] == label].sum(axis = 1))
-counts_meta = sp.csr_matrix(np.hstack(counts_meta))
-
-adata_test_meta = anndata.AnnData(X = counts_meta, obs = adata_test.obs)
-sc.pp.normalize_total(adata_test_meta, target_sum = 10e4, key_added = "libsize")
-sc.pp.log1p(adata_test_meta)
-
-# In[]
-# Mapping is changed, which makes the result worse
-# # preprocessing, use gene embed full
-# gene_overlap = np.intersect1d(adata_test.var["feature_name"].values, np.array([x for x in gene_embed_full.keys()]))
-# print("number of overlapped genes: {:d}".format(len(gene_overlap)))
-# adata_test = adata_test[:, adata_test.var["feature_name"].isin(gene_overlap)].copy()
-
-# sc.pp.filter_genes(adata_test, min_cells = int(0.01 * adata_test.shape[0]))
-# sc.pp.normalize_total(adata_test)
-# sc.pp.log1p(adata_test)
-
-# sc.pp.highly_variable_genes(adata_test, n_top_genes = 4000)
-# adata_test = adata_test[:, adata_test.var["highly_variable"]]
-# adata_test.varm["esm2"] = torch.vstack([gene_embed_full[x] for x in adata_test.var["feature_name"].values]).numpy()
-
-# adata_test_meta = preprocess_anndata(adata = adata_test, meta_embed = meta_embed, gene_embed_key = "esm2")
-
-# In[]
-expr_sent, feat_sent = data_utils.tokenize_expr_para(adata_test_meta.X, njobs = 16, nchunks = 16, npads = n_mgene + 1)
-
-fp = np.memmap(f"temp_test_expr_sent_{n_mgene}.npz", dtype='float32', mode='w+', shape=(adata_test_meta.shape[0], n_mgene + 1))
-fp[:] = expr_sent.toarray()[:]
-fp.flush()
-fp = np.memmap(f"temp_test_feat_sent_{n_mgene}.npz", dtype='int32', mode='w+', shape=(adata_test_meta.shape[0], n_mgene + 1))
-fp[:] = feat_sent.toarray()[:]
-fp.flush()
-
-# In[]
-# alternative dataset from anndata, TODO: need to deal with the case where no batch effect is needed
-import pandas as pd
-label_code = {val: idx for idx, val in enumerate(meta_dict["label_code"])}
-labels = np.where(adata_test.obs["cell_type_ontology_term_id"].isin(label_code), adata_test.obs["cell_type_ontology_term_id"].map(label_code), -1)
-batch_code = {val: idx for idx, val in enumerate(meta_dict["batch_code"])}
-batchs = np.where(adata_test.obs["dataset_id"].isin(batch_code), adata_test.obs["dataset_id"].map(batch_code), -1)
-test_dataset = data_utils.sc_dataset_chunk(expr_path = f"./temp_test_expr_sent_{n_mgene}.npz", gene_path = f"temp_test_feat_sent_{n_mgene}.npz", ncells = adata_test_meta.shape[0], npads = n_mgene + 1, labels = labels, batches = batchs)
-
-# In[]
 from pathlib import Path
 import sys, os
 
 import numpy as np
+import scipy.sparse as sparse
 import tqdm
+import anndata
+import seaborn as sns
+import matplotlib.pyplot as plt
 
 # packages for distributed training
 import torch
 from torch.utils import data
 
+sys.path.append("./src")
 
 import data_utils
 from transformer_model import TransformerModel, get_default_config
 import trainer
 import utils
+
+
+
 
 def evaluation(model, dataloader):
     # NOTE: training loop
@@ -146,6 +57,108 @@ def evaluation(model, dataloader):
     return val_loss, val_loss_mlm, val_loss_sup, val_loss_kd
 
 # In[]
+# NOTE: Given adata,
+# 1. transform into meta-gene counts
+# 3. transform meta-gene counts into cell sentence
+def preprocess_anndata_knn(adata, meta_embed, gene_embed_key = "esm2"):
+    """
+    Group the genes into meta-genes in adata according to meta-gene embedding, 
+    NOTE: genes are grouped into meta-genes according to the knn classifier, 
+    however the result is very different from the hard-code assignment, could cause deterioration of the result 
+    """
+    # NOTE: kneighbors classifier is causing all the issue. Should use the exact hard-coded assignment as described
+    knn = KNeighborsClassifier(n_neighbors = 5).fit(X = meta_embed.numpy(), y = np.arange(meta_embed.shape[0]))
+    meta_labels = knn.predict(adata.varm[gene_embed_key])
+    print(np.unique(meta_labels, return_counts = True))
+    adata.var["meta_labels"] = meta_labels
+
+    counts_meta = []
+    for label in range(meta_embed.shape[0]):
+        counts_meta.append(adata.layers["counts"][:, meta_labels == label].sum(axis = 1))
+    counts_meta = sp.csr_matrix(np.hstack(counts_meta))
+
+    adata_meta = anndata.AnnData(X = counts_meta, obs = adata.obs)
+    sc.pp.normalize_total(adata_meta, target_sum = 10e4, key_added = "libsize")
+    sc.pp.log1p(adata_meta)
+    
+    return adata_meta
+
+
+def preprocess_anndata(adata, feature_df, var_name = "gene_name"):
+    """
+    Group the genes into meta-genes in adata, according to the hard-coded grouping information
+    """
+    adata_s = adata.copy()
+    
+    if var_name == "gene_name":
+        gene_ids = feature_df["feature_name"].values.squeeze()
+        feature_df.index = gene_ids
+    elif var_name == "ensembl_id":
+        gene_ids = feature_df.index.values.squeeze()
+    else:
+        raise ValueError("Either gene_name or ensembl_id need to be provided in adata")
+
+    gene_ids = np.intersect1d(adata_s.var.index.values, gene_ids)
+    adata_s = adata_s[:, gene_ids]
+    print(f"overlapping genes: {len(gene_ids)}")
+    meta_labels = feature_df.loc[gene_ids, "labels"].values.squeeze()
+    counts_meta = np.zeros((adata_s.shape[0], len(np.unique(feature_df["labels"].values))))
+    for label in np.unique(meta_labels):
+        counts_meta[:, label] = adata_s.layers["counts"][:, meta_labels == label].toarray().sum(axis = 1)
+    counts_meta = sp.csr_matrix(counts_meta)
+    
+    adata_meta = anndata.AnnData(X = counts_meta, obs = adata_s.obs)
+
+    # preprocess the meta-gene count
+    sc.pp.normalize_total(adata_meta, target_sum = 10e4, key_added = "libsize")
+    sc.pp.log1p(adata_meta)
+
+    return adata_meta
+    
+# In[]
+# read the gene protein embedding and gene & meta-gene assignment
+
+n_mgene = 256
+gene_embed_dict = torch.load(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/gene_embed_meta{n_mgene}.pt", weights_only = False)
+feature_info = gene_embed_dict["labels"]
+
+# only for the purpose of feature name and feature id translation
+# adata_test = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/blood/partition_10.h5ad")
+# adata_test.layers["counts"] = adata_test.X.copy()
+
+adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
+adata_test_meta1 = preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
+
+adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
+adata_test_meta2 = preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
+
+adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
+adata_test_meta3 = preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
+
+# In[]
+adata_test_meta = adata_test_meta3
+
+# In[]
+# # NOTE: Mapping is changed, which makes the result worse
+# # gene embed full
+# gene_embed_full = torch.load("/project/zzhang834/llm_dataset/proteome/embeddings/Homo_sapiens.GRCh38.gene_symbol_to_embedding_ESM2.pt", weights_only = False)
+# # preprocessing, use gene embed full
+# gene_overlap = np.intersect1d(adata_test.var["feature_name"].values, np.array([x for x in gene_embed_full.keys()]))
+# print("number of overlapped genes: {:d}".format(len(gene_overlap)))
+# adata_test = adata_test[:, adata_test.var["feature_name"].isin(gene_overlap)].copy()
+
+# sc.pp.filter_genes(adata_test, min_cells = int(0.01 * adata_test.shape[0]))
+# # sc.pp.normalize_total(adata_test)
+# # sc.pp.log1p(adata_test)
+
+# # sc.pp.highly_variable_genes(adata_test, n_top_genes = 4000)
+# # adata_test = adata_test[:, adata_test.var["highly_variable"]]
+# adata_test.varm["esm2"] = torch.vstack([gene_embed_full[x] for x in adata_test.var["feature_name"].values]).numpy()
+
+# adata_test_meta = preprocess_anndata_knn(adata = adata_test, meta_embed = gene_embed_dict["meta_embed"], gene_embed_key = "esm2")
+
+
+# In[]
 # function
 data_utils.set_seed(3)
 
@@ -155,70 +168,105 @@ print(f"GPU - Using device: {device}")
 # Load the dataset
 print(f"GPU - Loading dataset...")
 
-n_mgene = 256
 # NOTE: save in localscratch for faster memory access
 # data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
 data_dir = Path(f"/localscratch/ziqi/localscratch_tempdata/cellxgene")
 # load the token embedding
 token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt")
 # load the cell meta-info
-meta_dict = torch.load(data_dir / f"meta_{n_mgene}_permu.pt")
+meta_dict = torch.load(data_dir / f"meta_{n_mgene}.pt")
 
+model_name = "checkpoint_0.98_contr_dynmask_1"
+# model_name = "checkpoint_0.98_1"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint/{model_name}.pth"
+res_dir = f"results/{model_name}_55million/"
+state = torch.load(model_dir)
+model_config = state["model_config"]
+model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
 
-model_config = get_default_config()
-batch_size = 512
-lr = 0.5e-5 * (batch_size/32)
-model_config.__dict__.update({"batch_size": batch_size,
-                                "n_epoch": 1,
-                                "lr": lr, # important for hyper-parameter tuning
-                                "n_warmup_stp_lr": 4000, # important for hyper-parameter tuning, 5-10% of total steps
-                                "d_embed": 512,
-                                "n_head": 8,
-                                "d_hidden": 2048, 
-                                "n_layer": 4,
-                                "d_output": 64,
-                                "dropout": 0.05, # important for hyper-parameter tuning
-                                "mask_prob": 0.4, # important for hyper-parameter tuning
-                                "lamb_kd": 0.0,
-                                "lamb_sup": 1.0,
-                                "sup_type": "contrastive",
-                                "sample_mlm": False,
-                                "mlm_include_zero": False,
-                                "pretrain_path":  "/project/zzhang834/LLM_KD/checkpoint_predfull/checkpoint_0.98_contr_1.pth",
-                                "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_predfull/",
-                                "checkpoint_prefix": None
-                                })
+labels = None
+batches = None
+test_dataset = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta, labels = labels, batches = batches, njobs = 16)
 
 test_loader = data.DataLoader(test_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
 print(f"GPU - Done.")
 
-# model hyper-parameters
 fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
-# wrap model into multi-gpus setting
-# fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
 
 print(f"GPU - Preloading lastest model'")
 # load parameter from last train
-state = torch.load(model_config.pretrain_path)
 fm_model.load_state_dict(state["model_state_dict"])
+print(f"GPU - Done.")
 
 
 # In[]
 # visualization
 import scvi
-
+from umap import UMAP
 # TODO: issue, for the classifier, should the masked input be used??
-adata_test2 = trainer.cell_embed(model = fm_model, dataloader = test_loader, multi_gpus = False)
-adata_test2.obsm["latent_umap"] = scvi.model.utils.mde(adata_test2.X.toarray(), accelerator = "gpu", seed = 0)
+adata_embed = trainer.cell_embed(model = fm_model, dataloader = test_loader, multi_gpus = False)
+adata_embed.obsm["latent_umap"] = UMAP(n_components = 2).fit_transform(adata_embed.X.toarray())
+adata_embed.obs = adata_test_meta.obs.copy()
+
 
 # In[]
-import anndata
-import seaborn as sns
-import matplotlib.pyplot as plt
-colormap =plt.cm.get_cmap("tab20b")
-               
-fig = utils.plot_embeds(embed = adata_test2.obsm["latent_umap"], annos = adata_test2.obs[["labels", "batchs"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = True)
+
+if not os.path.exists(res_dir):
+    os.makedirs(res_dir)
+
+colormap =plt.cm.get_cmap("tab20")
+# immune cell
+fig = utils.plot_embeds(embed = adata_embed.obsm["latent_umap"], annos = adata_embed.obs[["final_annotation", "batch"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
 fig.tight_layout()
+fig.savefig(res_dir + "embed_scIB_immune_all.png", bbox_inches = "tight")
+# pancrease
+fig = utils.plot_embeds(embed = adata_embed.obsm["latent_umap"], annos = adata_embed.obs[["celltype", "tech"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False)
+fig.tight_layout()
+fig.savefig(res_dir + "embed_scIB_pancrease.png", bbox_inches = "tight")
+# lung atlas
+fig = utils.plot_embeds(embed = adata_embed.obsm["latent_umap"], annos = adata_embed.obs[["cell_type", "batch"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 3, alpha = 0.7, colormap = colormap, label_inplace = False)
+fig.tight_layout()
+fig.savefig(res_dir + "embed_scIB_lung.png", bbox_inches = "tight")
+
+
+
+# # merge clusters
+# coarse_ct = {}
+# coarse_ct["monocyte"] = ["CD14-low, CD16-positive monocyte", "CD14-positive monocyte"]
+# coarse_ct["nk"] = ["CD16-negative, CD56-bright natural killer cell, human", "natural killer cell"]
+# coarse_ct["T"] = ["CD4-positive, alpha-beta T cell", "CD4-positive, alpha-beta cytotoxic T cell",
+#                        "CD8-positive, alpha-beta T cell", "central memory CD4-positive, alpha-beta T cell",
+#                        "central memory CD8-positive, alpha-beta T cell", "effector memory CD4-positive, alpha-beta T cell",
+#                        "effector memory CD8-positive, alpha-beta T cell", "gamma-delta T cell", "mucosal invariant T cell",
+#                        "naive thymus-derived CD4-positive, alpha-beta T cell", "naive thymus-derived CD8-positive, alpha-beta T cell",
+#                        "regulatory T cell"]
+
+# coarse_ct["CD4 T"] = ["CD4-positive, alpha-beta T cell", "CD4-positive, alpha-beta cytotoxic T cell",
+#                        "central memory CD4-positive, alpha-beta T cell", "effector memory CD4-positive, alpha-beta T cell",
+#                        "naive thymus-derived CD4-positive, alpha-beta T cell", "regulatory T cell"]
+
+# coarse_ct["CD8 T"] = ["CD8-positive, alpha-beta T cell", "central memory CD8-positive, alpha-beta T cell",
+#                        "effector memory CD8-positive, alpha-beta T cell", "naive thymus-derived CD8-positive, alpha-beta T cell"]
+
+# coarse_ct["B"] = ["naive B cell", "transitional stage B cell", "memory B cell"]
+# coarse_ct["dendritic"] = ["conventional dendritic cell", "dendritic cell", "plasmacytoid dendritic cell"]
+# coarse_ct["thymocyte"] = ["double negative thymocyte"]
+# coarse_ct["erythrocyte"] = ["erythrocyte"]
+
+# adata_test.obs[["cell_type (coarse)"]] = adata_test.obs[["cell_type"]].values
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["monocyte"]), "cell_type (coarse)"] = "monocyte"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["nk"]), "cell_type (coarse)"] = "nk"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["T"]), "cell_type (coarse)"] = "T"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["CD4 T"]), "cell_type (coarse)"] = "CD4 T"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["CD8 T"]), "cell_type (coarse)"] = "CD8 T"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["B"]), "cell_type (coarse)"] = "B"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["dendritic"]), "cell_type (coarse)"] = "dendritic"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["thymocyte"]), "cell_type (coarse)"] = "thymocyte"
+# adata_test.obs.loc[adata_test.obs["cell_type"].isin(coarse_ct["erythrocyte"]), "cell_type (coarse)"] = "erythrocyte"
+
+# fig = utils.plot_embeds(embed = adata_test2.obsm["latent_umap"], annos = adata_test.obs[["cell_type (coarse)"]].astype("category"), markerscale = 15, figsize = (25, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = True)
+# fig.tight_layout()
+# # fig.savefig(res_dir + "")
 
 # In[]
 

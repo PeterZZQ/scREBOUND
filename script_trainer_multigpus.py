@@ -16,6 +16,8 @@ from torch.utils import data
 from transformers import AdamW, get_linear_schedule_with_warmup
 
 
+sys.path.append("./src")
+
 import data_utils
 from transformer_model import TransformerModel, ModelConfig, get_default_config
 import trainer
@@ -40,6 +42,14 @@ def save_checkpoint(epoch, step, model, optimizer, scheduler, loss, path):
     print(f"Checkpoint saved at epoch {epoch}.")
 
 def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial_epoch, initial_step, log_step):
+    # NOTE: dynamic masking probability, small to large
+    if model.module.model_config.dynamic_maskprob:
+        mask_prob_init = 0.2
+        mask_prob_end = 0.5
+        mask_prob_step = (mask_prob_end - mask_prob_init) / len(train_loader) * log_step
+        model.module.model_config.mask_prob = mask_prob_init
+
+
     # NOTE: training loop
     for epoch in range(initial_epoch, model.module.model_config.n_epoch):
         torch.cuda.empty_cache()
@@ -99,6 +109,10 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                 running_loss_kd = 0.0
 
                 checkpoint_counter += 1
+
+                # update the mask_prob 
+                if model.module.model_config.dynamic_maskprob:
+                    model.module.model_config.mask_prob += mask_prob_step
                 # model evaluation and checkpoint saving
                 # only the first for evaluation
                 # if (global_rank == 0) & (checkpoint_counter == 10):
@@ -127,7 +141,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                             writer.add_scalar("Val Loss (MLM)", val_loss_mlm, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Val Loss (CLASS)", val_loss_sup, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Val Loss (KD)", val_loss_kd, epoch * len(train_loader) + step + 1)
-
+                            writer.add_scalar("Mask prob", model.module.model_config.mask_prob, epoch * len(train_loader) + step + 1)
                             print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (CLASS): {val_loss_sup:.4f}, Val Loss (KD): {val_loss_kd:.4f}")
 
                             # save only for the writer gpus
@@ -167,7 +181,7 @@ def main():
     # load the token embedding
     token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt")
     # load the cell meta-info
-    meta_dict = torch.load(data_dir / f"meta_{n_mgene}_permu.pt")
+    meta_dict = torch.load(data_dir / f"meta_{n_mgene}.pt")
 
 
     model_config = get_default_config()
@@ -187,20 +201,20 @@ def main():
                                   "d_output": 64,
                                   "dropout": 0.05, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
-                                  "dynamic_maskprob": False,
+                                  "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
                                   "lamb_kd": 0.0,
-                                  "lamb_sup": 1.0,
+                                  "lamb_sup": 0.0,
                                   "sup_type": "contrastive",
                                   "sample_mlm": False,
                                   "mlm_include_zero": False,
                                   "pretrain_path": None,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_predfull/",
-                                  "checkpoint_prefix": "checkpoint_0.98_contr"
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint/",
+                                  "checkpoint_prefix": "checkpoint_0.98_dynmask"
                                   })
 
     # construct dataset
-    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}_permu.npz", gene_path = data_dir / f"feat_sent_{n_mgene}_permu.npz",
-                                            ncells = meta_dict["shape"][0], npads = meta_dict["shape"][1], labels = meta_dict["label"], batches = meta_dict["batch"], batch_size = model_config.batch_size)
+    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
+                                            ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"], batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
     # train test split
     train_size = int(0.98 * len(scdataset))

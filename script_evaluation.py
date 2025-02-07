@@ -8,12 +8,16 @@ import tqdm
 # packages for distributed training
 import torch
 from torch.utils import data
+import seaborn as sns
+import pandas as pd
+import matplotlib.pyplot as plt
+sns.set_theme()
 
-
+sys.path.append("src/")
 import data_utils
 from transformer_model import TransformerModel, get_default_config
-import trainer
-import utils
+import trainer as trainer
+import utils as utils
 
 def evaluation(model, dataloader):
     # NOTE: training loop
@@ -52,41 +56,23 @@ print(f"GPU - Loading dataset...")
 
 n_mgene = 256
 # NOTE: save in localscratch for faster memory access
-# data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+# data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_old")
 data_dir = Path(f"/localscratch/ziqi/localscratch_tempdata/cellxgene")
+# data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
 # load the token embedding
 token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt")
 # load the cell meta-info
-meta_dict = torch.load(data_dir / f"meta_{n_mgene}_permu.pt")
+meta_dict = torch.load(data_dir / f"meta_{n_mgene}.pt")
 
 
-model_config = get_default_config()
-batch_size = 512
-lr = 1e-5 * (batch_size/32)
-model_config.__dict__.update({"batch_size": batch_size,
-                                "n_epoch": 1,
-                                "lr": lr, # important for hyper-parameter tuning
-                                "n_warmup_stp_lr": 4000, # important for hyper-parameter tuning, 5-10% of total steps
-                                "d_embed": 512,
-                                "n_head": 8,
-                                "d_hidden": 2048, 
-                                "n_layer": 4,
-                                "d_output": 64,
-                                "dropout": 0.05, # important for hyper-parameter tuning
-                                "mask_prob": 0.4, # important for hyper-parameter tuning
-                                "lamb_kd": 0.0,
-                                "lamb_sup": 1.0,
-                                "sup_type": "contrastive",
-                                "sample_mlm": False,
-                                "mlm_include_zero": False,
-                                "pretrain_path":  "/project/zzhang834/LLM_KD/checkpoint_predfull/checkpoint_0.98_contr_1.pth",
-                                "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_predfull/",
-                                "checkpoint_prefix": None
-                                })
+model_dir = "/project/zzhang834/LLM_KD/checkpoint/checkpoint_0.98_contr_dynmask_1.pth"
+state = torch.load(model_dir)
+model_config = state["model_config"]
+model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
 
 # construct dataset
-scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}_permu.npz", gene_path = data_dir / f"feat_sent_{n_mgene}_permu.npz",
-                                        ncells = meta_dict["shape"][0], npads = meta_dict["shape"][1], labels = meta_dict["label"], batches = meta_dict["batch"], batch_size = model_config.batch_size)
+scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
+                                        ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"], batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
 # train test split
 train_size = int(0.98 * len(scdataset))
@@ -94,53 +80,47 @@ val_size = int(0.00 * len(scdataset))
 test_size = int(0.02 * len(scdataset))
 # the data is already pre-shuffled
 train_dataset = data.Subset(scdataset, range(train_size))
-# val_dataset = data.Subset(scdataset, range(train_size, train_size + val_size))
-# val_dataset = data.Subset(scdataset, range(train_size + 10 * val_size, train_size + 11 * val_size))
 test_dataset = data.Subset(scdataset, range(train_size + val_size, min(train_size + val_size + test_size, len(scdataset))))
 
 # obtain train/val/test loaders
-# NOTE: multi-gpus for only train_loader
-# val_loader = data.DataLoader(val_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
 test_loader = data.DataLoader(test_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
 print(f"GPU - Done.")
 
 # model hyper-parameters
 fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
-# wrap model into multi-gpus setting
-# fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
 
 print(f"GPU - Preloading lastest model'")
 # load parameter from last train
-state = torch.load(model_config.pretrain_path)
 fm_model.load_state_dict(state["model_state_dict"])
+print(f"GPU - Done.")
 
 # In[]
+# NOTE: the dynamic masking mode allows for the adjustment of mask probability
 fm_model.model_config.sup_type = "contrastive"
-# val_loss, val_loss_mlm, val_loss_sup, val_loss_kd = evaluation(model = fm_model, dataloader = val_loader)
-test_loss, test_loss_mlm, test_loss_sup, test_loss_kd = evaluation(model = fm_model, dataloader = test_loader)
 
-fm_model.model_config.mask_prob = 0.0
-test_loss2, test_loss_mlm2, test_loss_sup2, test_loss_kd2 = evaluation(model = fm_model, dataloader = test_loader)
-
-fm_model.model_config.mask_prob = 0.6
-test_loss3, test_loss_mlm3, test_loss_sup3, test_loss_kd3 = evaluation(model = fm_model, dataloader = test_loader)
-
-fm_model.model_config.mask_prob = 0.8
-test_loss4, test_loss_mlm4, test_loss_sup4, test_loss_kd4 = evaluation(model = fm_model, dataloader = test_loader)
-
-fm_model.model_config.mask_prob = 1.0
-test_loss5, test_loss_mlm5, test_loss_sup5, test_loss_kd5 = evaluation(model = fm_model, dataloader = test_loader)
+losses_mlm = []
+losses_sup = []
+mask_probs = [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+for mask_prob in mask_probs:
+    fm_model.model_config.mask_prob = mask_prob
+    test_loss, test_loss_mlm, test_loss_sup, test_loss_kd = evaluation(model = fm_model, dataloader = test_loader)
+    losses_mlm.append(test_loss_mlm)
+    losses_sup.append(test_loss_sup)
 
 # In[]
-import seaborn as sns
-import pandas as pd
-import matplotlib.pyplot as plt
-sns.set_theme()
-loss = pd.DataFrame(data = np.array([[0.4, test_loss_mlm, test_loss_sup], [0.0, test_loss_mlm2, test_loss_sup2], [0.6, test_loss_mlm3, test_loss_sup3], [0.8, test_loss_mlm4, test_loss_sup4], [1.0, test_loss_mlm5, test_loss_sup5]]), columns = ["mask_prob", "loss (mlm)", "loss (sup)"])
+res_dir = "results/checkpoint_0.98_contr_dynmask2/"
+if not os.path.exists(res_dir):
+    os.makedirs(res_dir)
+
+loss_df = pd.DataFrame()
+loss_df["mask_prob"] = mask_probs
+loss_df["loss (mlm)"] = losses_mlm
+loss_df["loss (sup)"] = losses_sup
+
 fig = plt.figure(figsize = (20, 7))
 ax = fig.subplots(nrows = 1, ncols = 2)
-sns.barplot(data = loss, x = "mask_prob", y = "loss (mlm)", hue = "mask_prob", ax = ax[0], width = 0.6)
-sns.barplot(data = loss, x = "mask_prob", y = "loss (sup)", hue = "mask_prob", ax = ax[1], width = 0.6)
+sns.barplot(data = loss_df, x = "mask_prob", y = "loss (mlm)", hue = "mask_prob", ax = ax[0], width = 0.6)
+sns.barplot(data = loss_df, x = "mask_prob", y = "loss (sup)", hue = "mask_prob", ax = ax[1], width = 0.6)
 for i in ax[0].containers:
     ax[0].bar_label(i,)
 for i in ax[1].containers:
@@ -149,7 +129,7 @@ for i in ax[1].containers:
 ax[0].legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0)
 ax[1].legend(loc='upper left', bbox_to_anchor=(1.05, 1), borderaxespad=0)
 
-fig.savefig("test_loss.png", bbox_inches = "tight")
+fig.savefig(res_dir + "test_loss.png", bbox_inches = "tight", dpi = 200)
 
 # In[]
 # visualization
@@ -168,21 +148,23 @@ import seaborn as sns
 adata_test.obs["labels_name"] = [meta_dict["label_code"][x] for x in adata_test.obs["labels"]]
 adata_test.obs["batchs_name"] = [meta_dict["batch_code"][x] for x in adata_test.obs["batchs"]]
 
-
-adata_test = adata_test[adata_test.obs["batchs"].isin([72, 54, 8]), :]
+# select three batches
+adata_test2 = adata_test[adata_test.obs["batchs"].isin([72, 54, 8]), :]
+# adata_test2 = adata_test[adata_test.obs["labels"].isin([0,1,2,3,4,5,6]), :]
 # adata_test = anndata.read_h5ad("res_testloader_0.3.h5ad")
-fig = utils.plot_embeds(embed = adata_test.obsm["latent_umap"], annos = adata_test.obs[["labels", "batchs"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 1, alpha = 0.4)
+fig = utils.plot_embeds(embed = adata_test2.obsm["latent_umap"], annos = adata_test2.obs[["labels", "batchs"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4)
 fig.tight_layout()
-fig.savefig("temp_result.png", bbox_inches = "tight")
+fig.savefig(res_dir + "test_embed.png", bbox_inches = "tight")
 
-spectral_cmap = sns.color_palette("Spectral", as_cmap=True, n_colors = 400)
+spectral_cmap = sns.color_palette("Spectral", as_cmap=True, n_colors = 40)
 
-fig = utils.plot_embeds(embed = adata_test.obsm["latent_umap"], annos = adata_test.obs[["labels"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 1, alpha = 0.4, colormap = spectral_cmap)
-fig.savefig("temp_result_label.png", bbox_inches = "tight")
-fig = utils.plot_embeds(embed = adata_test.obsm["latent_umap"], annos = adata_test.obs[["batchs"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 1, alpha = 0.4, colormap = spectral_cmap)
-fig.savefig("temp_result_batch.png", bbox_inches = "tight")
+fig = utils.plot_embeds(embed = adata_test2.obsm["latent_umap"], annos = adata_test2.obs[["labels_name"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4)
 
-# In[]
+
+# fig = utils.plot_embeds(embed = adata_test.obsm["latent_umap"], annos = adata_test.obs[["labels"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4, colormap = spectral_cmap)
+# # fig.savefig("temp_result_label.png", bbox_inches = "tight")
+# fig = utils.plot_embeds(embed = adata_test.obsm["latent_umap"], annos = adata_test.obs[["batchs"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4, colormap = spectral_cmap)
+# # fig.savefig("temp_result_batch.png", bbox_inches = "tight")
 
 
 # %%

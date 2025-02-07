@@ -15,9 +15,9 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.utils import data
 
 
-import data_utils
-from transformer_model import TransformerModel, get_default_config
-import trainer
+import src.data_utils as data_utils
+from src.transformer_model import TransformerModel, get_default_config
+import src.trainer as trainer
 
 
 def sum_across_gpus(tensor):
