@@ -142,10 +142,6 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                             writer.add_scalar("Val Loss (KD)", val_loss_kd, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Mask prob", model.module.model_config.mask_prob, epoch * len(train_loader) + step + 1)
                             print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (CLASS): {val_loss_sup:.4f}, Val Loss (KD): {val_loss_kd:.4f}")
-
-                            # save only for the writer gpu
-                            save_checkpoint(epoch = epoch, step = step, model = model, optimizer = optimizer, scheduler = scheduler, loss = running_loss,
-                                            path = f"{model.module.model_config.checkpoint_path}{model.module.model_config.checkpoint_prefix}_{epoch}_{step}.pth")
                     
                     checkpoint_counter = 0                
                 # sync all gpus after eval
@@ -190,7 +186,7 @@ def main():
 
 
     model_config.__dict__.update({"batch_size": batch_size,
-                                  "n_epoch": 3,
+                                  "n_epoch": 5,
                                   "lr": lr, # important for hyper-parameter tuning
                                   "n_warmup_stp_lr": 4000, # important for hyper-parameter tuning, 5-10% of total steps
                                   "d_embed": 512,
@@ -200,32 +196,33 @@ def main():
                                   "d_output": 64,
                                   "dropout": 0.05, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
-                                  "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
+                                  "dynamic_maskprob": False, # mask_prob is dynamically updated from 0.1 to 0.7 during training
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 0.0,
                                   "sup_type": "contrastive",
                                   "sample_mlm": False,
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
-                                  "pretrain_path": None,
-                                #   "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_0.98_dynmask_1.pth",
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint/",
+                                  "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_0.98_dynmask_deepinj_1.pth",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_pancreas/",
                                   "checkpoint_prefix": "checkpoint_0.98_dynmask_deepinj"
                                   })
 
     # construct dataset
     # load the cell meta-info
     meta_dict = torch.load(data_dir / f"meta_{n_mgene}_rootannot.pt", weights_only = False)
+    meta_dict_pancreas = torch.load(data_dir / f"meta_{n_mgene}_pancreas.pt", weights_only = False)
     # total number of batches is 604, maximum batch size is 2million, minimum batch size is 843
 
     # NOTE: if use root cell annotation, label should be meta_dict["label_root"], if use the original annotation, label should be meta_dict["label"] 
     if model_config.sup_type == "classifier-bincode":
-        labels = meta_dict["label_bincode"]
+        labels = meta_dict_pancreas["label_bincode"]
     else:
-        labels = meta_dict["label"]
+        labels = meta_dict_pancreas["label"]
 
-    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
-                                            ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = labels, batches = meta_dict["batch"], batch_size = model_config.batch_size)
+    batches = meta_dict_pancreas["batch"]
+    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}_pancreas.npz", gene_path = data_dir / f"feat_sent_{n_mgene}_pancreas.npz",
+                                            ncells = meta_dict_pancreas["shape"]["full"][0], npads = meta_dict_pancreas["shape"]["full"][1], labels = labels, batches = batches, batch_size = model_config.batch_size)
 
     # train test split
     train_size = int(0.98 * len(scdataset))
@@ -265,22 +262,12 @@ def main():
         # load parameter from last train
         state = torch.load(model_config.pretrain_path, weights_only = False)
         fm_model.module.load_state_dict(state["model_state_dict"])
-
-        # NOTE: for continuous training, update optimizer and scheduler for consistent training
-        optimizer.load_state_dict(state['optimizer_state_dict'])
-        scheduler.load_state_dict(state["scheduler_state_dict"])
-        if state['step'] == 0:
-            initial_epoch = state['epoch'] + 1
-            initial_step = state['step']
-        else:
-            initial_epoch = state['epoch']
-            initial_step = state['step'] + 1
-        del state
     else:
-        initial_epoch = 0
-        initial_step = 0
         # If we couldn't find a model to preload, just start from scratch
         print(f'GPU {local_rank} - Could not find model to preload. Starting from scratch')
+
+    initial_epoch = 0
+    initial_step = 0
 
     # Init logger process, only main thread
     if global_rank == 0:

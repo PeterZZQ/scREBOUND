@@ -91,7 +91,7 @@ fm_model = TransformerModel(model_config = model_config, token_embed = token_emb
 
 print(f"GPU - Preloading lastest model'")
 # load parameter from last train
-fm_model.load_state_dict(state["model_state_dict"])
+# fm_model.load_state_dict(state["model_state_dict"])
 print(f"GPU - Done.")
 
 # In[]

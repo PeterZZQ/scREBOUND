@@ -20,13 +20,15 @@ batches = []
 
 n_mgene = 256
 res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+tissue_list = ["all_remain", "pancreas", "blood", "brain", "heart", "intestine", "kidney", "lung"]
+tissue_list = ["pancreas"]
 print("read gene expression...")
 # read in the anndata
 counts_norm = []
-for tissue in ["all_remain", "blood", "brain", "heart", "intestine", "kidney", "lung"]:
+for tissue in tissue_list:
     print(tissue)
     data_dir = Path(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/{tissue}")
-    adata = anndata.read_h5ad(data_dir / f"adata_meta{n_mgene}.h5ad")
+    adata = anndata.read_h5ad(data_dir / f"adata_meta{n_mgene}_4000hvg.h5ad")
     sc.pp.normalize_total(adata, target_sum = 10e4, key_added = "libsize")
     sc.pp.log1p(adata)
 
@@ -64,7 +66,7 @@ if permute_cells:
 
 # Tokenize counts_norm
 print("tokenize the data")
-n_chunks = 4
+n_chunks = 1
 counts_norm_list = data_utils.divide_chunks(counts = counts_norm, nchunks = n_chunks)
 del counts_norm
 
@@ -154,99 +156,3 @@ print("Done.")
 # print("Done.")
 
 
-# In[]
-# ----------------------------------------------------------------------------
-#
-# Process the labels
-#
-# ----------------------------------------------------------------------------
-import pandas as pd
-from ontobio.ontol_factory import OntologyFactory
-n_mgene = 256
-meta_dict = torch.load(f"/localscratch/ziqi/localscratch_tempdata/cellxgene/meta_{n_mgene}.pt")
-ont = OntologyFactory().create("/project/zzhang834/LLM_KD/dataset/cl.json")
-# Step 2: Function to get ancestors in Cell Ontology
-def get_ancestors(cl_id):
-    """
-    Get all ancestors of a cell type based on its Cell Ontology ID.
-    """
-    asso_list = ont.ancestors(cl_id)
-
-    return [x for x in asso_list if x[:2] == "CL"]
-
-def get_parents(cl_id):
-    """
-    Get all ancestors of a cell type based on its Cell Ontology ID.
-    """
-    asso_list = ont.parents(cl_id)
-
-    return [x for x in asso_list if x[:2] == "CL"]
-
-
-label_ids, label_id_counts = np.unique(meta_dict["label"], return_counts = True)
-label_ids = label_ids[np.argsort(label_id_counts)]
-label_ids_code = meta_dict["label_code"][label_ids]
-label_code_clid = np.array([x.split("--")[0] for x in label_ids_code])
-label_id_counts = np.sort(label_id_counts)
-
-# create the dataframe
-label_code_df = pd.DataFrame(index = label_code_clid, columns = ["cell_type"], data = np.array([x.split("--")[1] for x in label_ids_code])[:,None])
-
-
-
-# filter for small cell types,
-n_cells_filter = 500
-label_id_counts_f = label_id_counts[label_id_counts < n_cells_filter]
-label_code_clid_f = label_code_clid[label_id_counts < n_cells_filter]
-
-for clid in label_code_clid_f:
-    ancesters = get_ancestors(clid)
-    # ancesters = get_parents(clid)
-    for ancester in ancesters:
-        if ancester in label_code_clid:
-            print(clid)
-            print(label_code_df.loc[clid, "cell_type"])
-            print(ancester)
-            print(label_code_df.loc[ancester, "cell_type"])
-    break
-
-def check_ancester(ancesters, ancesters_list):
-    selected_ancesters = []
-    for ancester in ancesters:
-        if ancester in ancesters_list:
-            selected_ancesters.append(selected_ancesters)
-    
-    if len(selected_ancesters) == 0:
-        return None
-    else:
-        return selected_ancesters
-
-
-for clid in label_code_clid_f:
-    # find all parents and sort them by ascending orders
-    while(selected_):
-        ancesters = get_parents(clid)
-
-
-
-    selected_ancesters = check_ancester(ancesters, label_code_clid)
-
-    if selected_ancesters is None:
-        ancesters_level2 = []
-        for ancester in ancesters:
-            selected_ancesters = check_ancester(ancesters_level2, label_code_clid)
-            if selected_ancesters is not None: 
-                ancesters_level2.extend(selected_ancesters)
-        if len(ancesters_level2) == 0:
-            print("no ancester:" + str(label_code_df.loc[clid, "cell_type"]))
-        else:
-            print("ancester:" + str(label_code_df.loc[clid, "cell_type"]))
-    else:
-        print("ancester:" + str(label_code_df.loc[clid, "cell_type"]))
-            
-    break
-
-
-
-
-# %%
