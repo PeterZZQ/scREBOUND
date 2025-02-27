@@ -20,6 +20,7 @@ import pandas as pd
 
 # packages for distributed training
 import torch
+import torch.nn as nn
 from torch.utils import data
 
 sys.path.append("./src")
@@ -59,7 +60,34 @@ def evaluation(model, dataloader):
 
     return val_loss, val_loss_mlm, val_loss_sup, val_loss_kd
 
+# Test cell type prediction, considering ct and its parents for stability
+def label_prediction(cell_embed, select_labels = None, use_hierclass = False):
+    """\
+    Description:
+    ------------
+        Predict the cell type label using the cell embedding.
 
+    Parameters:
+    ------------
+        cell_embed: the cell embedding tensor (ncells, ndims)
+        select_labels: the labels of interest (Cell Ontology form) in the cell population, narrow the searching scope
+        use_hierclass: set True to consider the parents prediction for stability
+    """
+    with torch.no_grad():
+        output = nn.functional.sigmoid(fm_model.classifier(torch.FloatTensor(cell_embed).to(fm_model.device)))
+        if use_hierclass:
+            class_scores = []
+            for label_bincode in meta_dict["label_bincode"]:
+                class_scores.append(output[:, label_bincode == 1].mean(dim = 1))
+            class_scores = torch.vstack(class_scores).cpu().numpy().T
+        else:
+            class_scores = output.cpu().numpy()
+        
+    if select_labels is not None:
+        idx = np.array([False if (label in select_labels) else True for label in meta_dict["label_code"]], dtype = bool)
+        class_scores[:, idx] = -100 
+    class_pred = meta_dict["label_code"][np.argmax(class_scores, axis = 1)]
+    return class_pred
 # In[]
 # NOTE: Given adata,
 # 1. transform into meta-gene counts
@@ -98,25 +126,25 @@ feature_info = gene_embed_dict["labels"]
 # adata_test = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/blood/partition_10.h5ad")
 # adata_test.layers["counts"] = adata_test.X.copy()
 
-# adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
-# adata_test_meta1 = preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
+adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
+adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
 # adata_test_meta1.write_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
 
-# adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
-# adata_test_meta2 = preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
+adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
+adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
 # adata_test_meta2.write_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
 
-# adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
-# adata_test_meta3 = preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
+adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
+adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
 # adata_test_meta3.write_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
 
-adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
-adata_test_meta2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
-adata_test_meta3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
+# adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
+# adata_test_meta2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
+# adata_test_meta3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
 
 
 # take out the pancreas dataset
-adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256_4000hvg.h5ad")
+adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
 sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
 sc.pp.log1p(adata_pancreas)
 adata_test_meta4 = adata_pancreas
@@ -181,33 +209,27 @@ data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
 # load the token embedding
 token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False)
 # load the cell meta-info
-meta_dict = torch.load(data_dir / f"meta_{n_mgene}.pt", weights_only = False)
+meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = False)
 
+# ------------------------------Update for the model selected---------------------------------------------------
 # NOTE: 1. vanilla model with only mlm loss
 # pretrained model
-model_name = "checkpoint_0.98_dynmask_deepinj_2_12599"
-# fine-tuned model
-# model_name = "checkpoint_0.98_dynmask_deepinj_5"
-
-
-
-# NOTE: 2. model with mlm and classifier/contrastive loss
-# # compare with linear (no-activation) & non-deep injection
-# model_name = "checkpoint_0.98_contr_rootannot_dynmask_1"
-# model_name = "checkpoint_0.98_contrcb_rootannot_dynmask_1"
-
-# # NOTE: for deep injection, both the injection part and the final activation part affect the final result
-# model_name = "checkpoint_0.98_contrcb_rootannot_dynmask_deepinj_1"
-# model_name = "checkpoint_0.98_contr_rootannot_dynmask_deepinj_1"
-
+model_name = "checkpoint_6_512_classi100_1"
+# model_name = "checkpoint_6_512_classiunweight100_1"
 model_dir = f"/project/zzhang834/LLM_KD/checkpoint/{model_name}.pth"
-# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_pancreas/{model_name}.pth"
 
-res_dir = f"results/{model_name}_56million/"
-# res_dir = f"results/pancreas_finetune/{model_name}_56million/"
+# fine-tuned model
+model_name = "checkpoint_6_512_classiunweight100_disc10_1"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_disc/{model_name}.pth"
+
+res_dir = f"results/{model_name}/"
+res_dir = f"results/finetune_disc/{model_name}/"
 state = torch.load(model_dir, weights_only = False)
 model_config = state["model_config"]
+# model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir, "use_discriminator": False, "lamb_disc": 0.0})
 model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
+# ------------------------------------------------------------------------------------------------------------------
+
 
 labels = None
 batches = None
@@ -226,15 +248,21 @@ print(f"GPU - Done.")
 fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
 
 print(f"GPU - Preloading lastest model'")
-# load parameter from last train
-fm_model.load_state_dict(state["model_state_dict"])
+# Get the common keys between the current model and the saved model
+filtered_state_dict = {k: v for k, v in state["model_state_dict"].items() if k in fm_model.state_dict()}
+# Load the filtered state dictionary into the model
+fm_model.load_state_dict(filtered_state_dict, strict=False)
+
 print(f"GPU - Done.")
 
 
 # In[]
+# ------------------------------------------------------------------------------------------------------------------------
+#
+# Visualize the embedding and measure the batch effect removal
+#
+# ------------------------------------------------------------------------------------------------------------------------
 # NOTE: calculate the embedding
-import scvi
-from umap import UMAP
 # TODO: issue, for the classifier, should the masked input be used??
 adata_embed1 = trainer.cell_embed(model = fm_model, dataloader = test_loader1, multi_gpus = False)
 adata_embed1.obs = adata_test_meta1.obs.copy()
@@ -296,11 +324,241 @@ scores2 = eval.eval_batch_correction(adata = adata_embed2, embed_key = "latent",
 scores2["dataset"] = "Pancreas"
 scores3 = eval.eval_batch_correction(adata = adata_embed3, embed_key = "latent", label_key = "cell_type", batch_key = "dataset")
 scores3["dataset"] = "Lung"
+scores4 = eval.eval_batch_correction(adata = adata_embed4, embed_key = "latent", label_key = "cell_type", batch_key = "dataset_id")
+scores4["dataset"] = "Pancreas-training"
 
-scores = pd.concat([scores1, scores2, scores3], axis = 0, ignore_index = True)
+scores = pd.concat([scores1, scores2, scores3, scores4], axis = 0, ignore_index = True)
 scores.to_csv(res_dir + "scores_scib.csv")
 
+# In[]
+# ------------------------------------------------------------------------------------------------------------------------
+#
+# Measure the prediction accuracy of the classifier
+#
+# ------------------------------------------------------------------------------------------------------------------------
+# HSPCs, Megakaryocyte progenitors in gt annotation is missing, 
+#'CL:0000037--hematopoietic stem cell', all cells are classified as hsc
+ct2onto1 = {'CD10+ B cells': 'CL:0000785--mature B cell',
+            'CD20+ B cells': 'CL:0000785--mature B cell',
+            # 'CD14+ Monocytes': 'CL:0001054--CD14-positive monocyte', 
+            'CD16+ Monocytes': 'CL:0000576--monocyte',
+            'CD14+ Monocytes': 'CL:0000576--monocyte',
+            'Monocyte progenitors': 'CL:0000576--monocyte',
+            'CD4+ T cells': 'CL:0000492--CD4-positive helper T cell',
+            'CD8+ T cells': 'CL:0000625--CD8-positive, alpha-beta T cell',
+            'Erythrocytes': 'CL:0000232--erythrocyte',
+            'Erythrocytes progenitors': 'CL:0000232--erythrocyte', 
+            'Monocyte-derived dendritic cells': 'CL:0011031--monocyte-derived dendritic cell',
+            'NK cells': 'CL:0000623--natural killer cell',
+            'NKT cells': 'CL:0000814--mature NK T cell',
+            'Plasma cells': 'CL:0000786--plasma cell',
+            'Plasmacytoid dendritic cells': 'CL:0001058--plasmacytoid dendritic cell, human',
+            'HSPCs': 'Other',
+            'Megakaryocyte progenitors': 'Other'} 
 
+# ct2onto1 = pd.DataFrame(ct2onto1, index = ["cell ontology"]).T
+# ct2onto1["ground truth label"] = ct2onto1.index.values
+
+select_label1 = np.array([x for x in ct2onto1.values() if x != 'Other'])
+select_label1 = np.unique(select_label1)
+
+# replace the ground truth label with cell ontology term for accuracy measurement
+adata_embed1.obs["cell ontology (gt)"] = adata_embed1.obs["final_annotation"].astype(object)
+for ct, ct_ontology in ct2onto1.items():
+    adata_embed1.obs.loc[adata_embed1.obs["cell ontology (gt)"] == ct, "cell ontology (gt)"] = ct_ontology
+adata_embed1.obs["cell ontology (gt)"] = adata_embed1.obs["cell ontology (gt)"].astype("category")
+
+ct2onto2 = {'acinar': 'CL:0002064--pancreatic acinar cell',
+            'activated_stellate': 'CL:0002410--pancreatic stellate cell',
+            'alpha': 'CL:0000171--pancreatic A cell',
+            'beta': 'CL:0000169--type B pancreatic cell',
+            'delta': 'CL:0000173--pancreatic D cell', 
+            'ductal': 'CL:0002079--pancreatic ductal cell',
+            'endothelial': 'CL:0000115--endothelial cell',
+            'epsilon': 'CL:0005019--pancreatic epsilon cell',
+            'gamma': 'CL:0002275--pancreatic PP cell',
+            'macrophage': 'CL:0000235--macrophage',
+            'mast': 'CL:0000097--mast cell',
+            'quiescent_stellate': 'CL:0002410--pancreatic stellate cell',
+            'schwann': 'CL:0002573--Schwann cell',
+            't_cell': 'CL:0000084--T cell'}
+
+# ct2onto2 = pd.DataFrame(ct2onto2, index = ["cell ontology"]).T
+# ct2onto2["ground truth label"] = ct2onto2.index.values
+
+select_label2 = np.array([x for x in ct2onto2.values()])
+select_label2 = np.unique(select_label2)
+
+# replace the ground truth label with cell ontology term for accuracy measurement
+adata_embed2.obs["cell ontology (gt)"] = adata_embed2.obs["celltype"].astype(object)
+for ct, ct_ontology in ct2onto2.items():
+    adata_embed2.obs.loc[adata_embed2.obs["cell ontology (gt)"] == ct, "cell ontology (gt)"] = ct_ontology
+adata_embed2.obs["cell ontology (gt)"] = adata_embed2.obs["cell ontology (gt)"].astype("category")
+
+
+ct2onto3 = {'B cell': 'CL:0000785--mature B cell',
+            'Basal 1': 'CL:0000646--basal cell',
+            'Basal 2': 'CL:0000646--basal cell',
+            'Ciliated': 'CL:0000064--ciliated cell',
+            'Dendritic cell': 'CL:0000451--dendritic cell',
+            'Endothelium': 'CL:0000115--endothelial cell',
+            'Fibroblast': 'CL:0000057--fibroblast', 
+            'Ionocytes': 'CL:0005006--ionocyte',
+            'Lymphatic': 'Other', # issue: if use lymphoid, then all T cells would also be classified as lymphoid
+            'Type 1': 'CL:4028004--alveolar type 1 fibroblast cell',
+            'Type 2': 'CL:4028006--alveolar type 2 fibroblast cell',
+            'Macrophage': 'CL:0000235--macrophage',
+            'Mast cell': 'CL:0000097--mast cell',
+            'Neutrophil_CD14_high': 'CL:0000775--neutrophil',
+            'Neutrophils_IL1R2': 'CL:0000775--neutrophil',
+            'Secretory': 'CL:0000151--secretory cell',
+            'T/NK cell': 'T/NK cell',
+            'T/NK cell': 'T/NK cell'}
+
+# ct2onto3 = pd.DataFrame(ct2onto3, index = ["cell ontology"]).T
+# ct2onto3["ground truth label"] = ct2onto3.index.values
+
+select_label3 = np.array([x for x in ct2onto3.values() if (x != 'Other') and (x != 'T/NK cell')] + ['CL:0000084--T cell', 'CL:0000623--natural killer cell'])
+select_label3 = np.unique(select_label3)
+
+adata_embed3.obs["cell ontology (gt)"] = adata_embed3.obs["cell_type"].astype(object)
+for ct, ct_ontology in ct2onto3.items():
+    adata_embed3.obs.loc[adata_embed3.obs["cell ontology (gt)"] == ct, "cell ontology (gt)"] = ct_ontology
+adata_embed3.obs["cell ontology (gt)"] = adata_embed3.obs["cell ontology (gt)"].astype("category")
+
+# transform the label for dataset 4
+adata_embed4.obs["cell ontology (gt)"] = [x + "--" + y for x,y in zip(adata_embed4.obs["cell_type_ontology_term_id"], adata_embed4.obs["cell_type"])]
+adata_embed4.obs["cell ontology (gt)"] = adata_embed4.obs["cell ontology (gt)"].astype("category")
+select_label4 = np.unique(adata_embed4.obs["cell ontology (gt)"].values)
+
+adata_embed1.obs["label_predict (use_hier)"] = label_prediction(adata_embed1.X.toarray(), select_label1, use_hierclass = True)
+adata_embed1.obs["label_predict"] = label_prediction(adata_embed1.X.toarray(), select_label1, use_hierclass = False)
+# transform the ground truth labels
+adata_embed2.obs["label_predict (use_hier)"] = label_prediction(adata_embed2.X.toarray(), select_label2, use_hierclass = True)
+adata_embed2.obs["label_predict"] = label_prediction(adata_embed2.X.toarray(), select_label2, use_hierclass = False)
+adata_embed3.obs["label_predict (use_hier)"] = label_prediction(adata_embed3.X.toarray(), select_label3, use_hierclass = True)
+adata_embed3.obs["label_predict"] = label_prediction(adata_embed3.X.toarray(), select_label3, use_hierclass = False)
+
+adata_embed4.obs["label_predict (use_hier)"] = label_prediction(adata_embed4.X.toarray(), select_label4, use_hierclass = True)
+adata_embed4.obs["label_predict"] = label_prediction(adata_embed4.X.toarray(), select_label4, use_hierclass = False)
+
+# NOTE: need to process embed3 as both T cells and NK cells are TNK cells for accuracy calculation
+adata_embed3.obs.loc[adata_embed3.obs["label_predict"] == 'CL:0000084--T cell', "label_predict"] = 'T/NK cell'
+adata_embed3.obs.loc[adata_embed3.obs["label_predict"] == 'CL:0000623--natural killer cell', "label_predict"] = 'T/NK cell'
+adata_embed3.obs.loc[adata_embed3.obs["label_predict (use_hier)"] == 'CL:0000084--T cell', "label_predict (use_hier)"] = 'T/NK cell'
+adata_embed3.obs.loc[adata_embed3.obs["label_predict (use_hier)"] == 'CL:0000623--natural killer cell', "label_predict (use_hier)"] = 'T/NK cell'
+
+adata_embed1.obs["label_predict (use_hier)"] = pd.Categorical(adata_embed1.obs["label_predict (use_hier)"], categories=adata_embed1.obs["cell ontology (gt)"].cat.categories)
+adata_embed1.obs["label_predict"] = pd.Categorical(adata_embed1.obs["label_predict"], categories=adata_embed1.obs["cell ontology (gt)"].cat.categories)
+adata_embed2.obs["label_predict (use_hier)"] = pd.Categorical(adata_embed2.obs["label_predict (use_hier)"], categories=adata_embed2.obs["cell ontology (gt)"].cat.categories)
+adata_embed2.obs["label_predict"] = pd.Categorical(adata_embed2.obs["label_predict"], categories=adata_embed2.obs["cell ontology (gt)"].cat.categories)
+adata_embed3.obs["label_predict (use_hier)"] = pd.Categorical(adata_embed3.obs["label_predict (use_hier)"], categories=adata_embed3.obs["cell ontology (gt)"].cat.categories)
+adata_embed3.obs["label_predict"] = pd.Categorical(adata_embed3.obs["label_predict"], categories=adata_embed3.obs["cell ontology (gt)"].cat.categories)
+
+adata_embed4.obs["label_predict (use_hier)"] = pd.Categorical(adata_embed4.obs["label_predict (use_hier)"], categories=adata_embed4.obs["cell ontology (gt)"].cat.categories)
+adata_embed4.obs["label_predict"] = pd.Categorical(adata_embed4.obs["label_predict"], categories=adata_embed4.obs["cell ontology (gt)"].cat.categories)
+
+
+# In[]
+# Measure the prediction accuracy, drop the Other cells
+from sklearn.metrics import f1_score
+f1_score1 = f1_score(y_true = np.array([x for x in adata_embed1.obs.loc[adata_embed1.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed1.obs.loc[adata_embed1.obs["cell ontology (gt)"] != "Other", "label_predict (use_hier)"]]),
+                   average = "micro")
+f1_score2 = f1_score(y_true = np.array([x for x in adata_embed2.obs.loc[adata_embed2.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed2.obs.loc[adata_embed2.obs["cell ontology (gt)"] != "Other", "label_predict (use_hier)"]]),
+                   average = "micro")
+f1_score3 = f1_score(y_true = np.array([x for x in adata_embed3.obs.loc[adata_embed3.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed3.obs.loc[adata_embed3.obs["cell ontology (gt)"] != "Other", "label_predict (use_hier)"]]),
+                   average = "micro")
+f1_score4 = f1_score(y_true = np.array([x for x in adata_embed4.obs.loc[adata_embed4.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed4.obs.loc[adata_embed4.obs["cell ontology (gt)"] != "Other", "label_predict (use_hier)"]]),
+                   average = "micro")
+
+f1_score5 = f1_score(y_true = np.array([x for x in adata_embed1.obs.loc[adata_embed1.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed1.obs.loc[adata_embed1.obs["cell ontology (gt)"] != "Other", "label_predict"]]),
+                   average = "micro")
+f1_score6 = f1_score(y_true = np.array([x for x in adata_embed2.obs.loc[adata_embed2.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed2.obs.loc[adata_embed2.obs["cell ontology (gt)"] != "Other", "label_predict"]]),
+                   average = "micro")
+f1_score7 = f1_score(y_true = np.array([x for x in adata_embed3.obs.loc[adata_embed3.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed3.obs.loc[adata_embed3.obs["cell ontology (gt)"] != "Other", "label_predict"]]),
+                   average = "micro")
+f1_score8 = f1_score(y_true = np.array([x for x in adata_embed4.obs.loc[adata_embed4.obs["cell ontology (gt)"] != "Other", "cell ontology (gt)"]]),
+                   y_pred = np.array([x for x in adata_embed4.obs.loc[adata_embed4.obs["cell ontology (gt)"] != "Other", "label_predict"]]),
+                   average = "micro")
+
+scores = pd.DataFrame(columns = ["F1 score (micro)", "dataset", "method"])
+scores["F1 score (micro)"] = [f1_score1, f1_score2, f1_score3, f1_score4, f1_score5, f1_score6, f1_score7, f1_score8]
+scores["dataset"] = ["Immune All", "Pancreas", "Lung Atlas", "Pancreas-training", "Immune All", "Pancreas", "Lung Atlas", "Pancreas-training"]
+scores["method"] = ["class (use hier)", "class (use hier)", "class (use hier)", "class (use hier)", "class", "class", "class", "class"]
+scores.to_csv(res_dir + "scores_prediction.csv")
+
+fig = utils.plot_embeds(embed = adata_embed1.obsm["X_umap"], annos = adata_embed1.obs[["final_annotation", "cell ontology (gt)", "label_predict (use_hier)", "label_predict"]].astype("category"), markerscale = 5, figsize = (25, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False, ncols = 2)
+fig.tight_layout()
+fig.savefig(res_dir + "prediction_scIB_immune_all.png", bbox_inches = "tight")
+
+fig = utils.plot_embeds(embed = adata_embed2.obsm["X_umap"], annos = adata_embed2.obs[["celltype", "cell ontology (gt)", "label_predict (use_hier)", "label_predict"]].astype("category"), markerscale = 5, figsize = (30, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False, ncols = 2)
+fig.tight_layout()
+fig.savefig(res_dir + "prediction_scIB_pancreas.png", bbox_inches = "tight")
+
+fig = utils.plot_embeds(embed = adata_embed3.obsm["X_umap"], annos = adata_embed3.obs[["cell_type", "cell ontology (gt)", "label_predict (use_hier)", "label_predict"]].astype("category"), markerscale = 5, figsize = (30, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False, ncols = 2)
+fig.tight_layout()
+fig.savefig(res_dir + "prediction_scIB_lung.png", bbox_inches = "tight")
+
+fig = utils.plot_embeds(embed = adata_embed4.obsm["X_umap"], annos = adata_embed4.obs[["cell_type", "cell ontology (gt)", "label_predict (use_hier)", "label_predict"]].astype("category"), markerscale = 5, figsize = (30, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False, ncols = 2)
+fig.tight_layout()
+fig.savefig(res_dir + "prediction_scIB_training_pancreas.png", bbox_inches = "tight")
+
+
+# In[]
+assert False
+# NOTE: Sanity check, check the classifier weight, only for weighted classifier
+import torch.nn as nn
+classifier_weight = nn.functional.softmax(fm_model.classifier_weight.data, dim = 0)
+classifier_weight = classifier_weight.detach().cpu().numpy()
+
+fig = plt.figure(figsize = (10, 7))
+ax = fig.add_subplot()
+sns.histplot(classifier_weight)
+
+# average weight
+baseline_weight = 1/fm_model.n_label
+print(np.sum(classifier_weight > baseline_weight))
+print(np.sum(classifier_weight <= baseline_weight))
+
+
+print(meta_dict["label_code"][np.argsort(classifier_weight)[::-1]])
+
+
+# In[]
+# NOTE: check pancreas dataset distribution across batchs/techs
+tech_group1 = ["fluidigmc1", "smarter", "smartseq2"]
+adata_techgroup1 = adata_test_meta2[adata_test_meta2.obs["tech"].isin(tech_group1),:]
+adata_techgroup2 = adata_test_meta2[~adata_test_meta2.obs["tech"].isin(tech_group1),:]
+
+# only happens in certain cell types including: 
+ct_interest = ["alpha", "beta", "delta", "gamma"]
+adata_techgroup1 = adata_techgroup1[adata_techgroup1.obs["celltype"].isin(ct_interest), :]
+adata_techgroup2 = adata_techgroup2[adata_techgroup2.obs["celltype"].isin(ct_interest), :]
+
+libsize_techgroup1 = adata_techgroup1.X.toarray().sum(axis = 1)
+libsize_techgroup2 = adata_techgroup2.X.toarray().sum(axis = 1)
+
+fig = plt.figure(figsize = (25, 7))
+ax = fig.subplots(nrows = 1, ncols = 2)
+sns.kdeplot(libsize_techgroup1, ax = ax[0], color = "blue")
+sns.kdeplot(libsize_techgroup2, ax = ax[0], color = "red")
+
+# wilcoxon test to check which gene has more distinct distribution
+adata_merge = anndata.concat([adata_techgroup1, adata_techgroup2], axis = 0, label = "group", keys = ["smartseq etc.", "rest"])
+sc.tl.rank_genes_groups(adata_merge, groupby = "group", method = "wilcoxon")
+adata_merge.uns["rank_genes_groups"]
+
+sc.pl.rank_genes_groups_dotplot(adata_merge, groupby="group", standard_scale="var", n_genes = 10, ax = ax[1])
+
+fig.suptitle("fluidigmc1, smarter, smartseq2 (blue) v.s. rest")
+fig.savefig("results/test_pancreas_4000hvg_stats.png", bbox_inches = "tight")
 
 # In[]
 # # merge clusters

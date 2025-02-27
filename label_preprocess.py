@@ -89,7 +89,8 @@ n_mgene = 256
 # data_dir = "/localscratch/ziqi/localscratch_tempdata/cellxgene/"
 data_dir = "/project/zzhang834/LLM_KD/dataset/cellxgene/"
 
-meta_dict = torch.load(data_dir + f"meta_{n_mgene}_pancreas.pt", weights_only = False)
+# meta_dict = torch.load(data_dir + f"meta_{n_mgene}_pancreas.pt", weights_only = False)
+meta_dict = torch.load(data_dir + f"meta_{n_mgene}.pt", weights_only = False)
 # create the cell ontology tree from the labels
 ont = OntologyFactory().create("/project/zzhang834/LLM_KD/dataset/cl.json")
 label_ids, label_id_counts = np.unique(meta_dict["label"], return_counts = True)
@@ -154,7 +155,7 @@ for idx, clid in enumerate(label_code_df.index.values.squeeze()):
 label_code_bincode = label_bincode.loc[np.array([x.split("--")[0] for x in meta_dict["label_code"]]), :].values
 meta_dict["label_bincode"] = label_code_bincode
 
-torch.save(meta_dict, data_dir + f"meta_{n_mgene}_pancreas_rootannot.pt")
+torch.save(meta_dict, data_dir + f"meta_{n_mgene}_bincode.pt")
 
 
 # %%

@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.distributed as dist
+from torch.nn.functional import sigmoid, softmax
 
 def compute_cross_entropy(p, q):
     q = nn.functional.log_softmax(q, dim=-1)
@@ -133,6 +134,37 @@ class MultiPosConLossMultiGPUs(nn.Module):
         loss = compute_cross_entropy(p, logits)
 
         return loss
+
+
+
+import torch
+
+def bce_weighted(pred, target, weight = None, eps = 1e-12):
+    """
+    Compute the binary cross-entropy loss from scratch.
+
+    Args:
+        pred (torch.Tensor): Predicted probabilities (values between 0 and 1) of shape (N, *).
+        target (torch.Tensor): Ground truth binary labels (0 or 1) with the same shape as pred.
+        eps (float): A small value to avoid log(0).
+
+    Returns:
+        torch.Tensor: The mean binary cross-entropy loss.
+    """
+    # Clamp predictions to avoid log(0)
+
+    pred = torch.clamp(sigmoid(pred), eps, 1 - eps)
+    
+    # Compute the element-wise binary cross-entropy loss
+    if weight is None:
+        loss = - (target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+    else:
+        weight = softmax(weight, dim = 0)
+        loss = - (target * torch.log(pred) * weight[None, :] + (1 - target) * torch.log(1 - pred) * weight[None, :])
+        
+    # Return the mean loss over all elements
+    return loss.sum(dim = 1).mean()
+
 
 '''
 class _MultiPosConLossMultiGPUs(nn.Module):

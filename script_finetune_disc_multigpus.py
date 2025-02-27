@@ -48,6 +48,12 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
         mask_prob_end = 0.5
         mask_prob_step = (mask_prob_end - mask_prob_init) / len(train_loader) / (model.module.model_config.n_epoch - initial_epoch) * log_step
         model.module.model_config.mask_prob = mask_prob_init
+    
+    if model.module.model_config.use_discriminator:
+        lamb_reverse_init = 1.0 # the lamb_reverse is static
+        lamb_reverse_end = 1.0
+        lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / len(train_loader) / (model.module.model_config.n_epoch - initial_epoch) * log_step
+        model.module.model_config.lamb_reverse = lamb_reverse_init
 
 
     # NOTE: training loop
@@ -102,10 +108,10 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                     writer.add_scalar("Train Loss (TOTAL)", running_loss, epoch * len(train_loader) + step + 1)
                     writer.add_scalar("Train Loss (MLM)", running_loss_mlm, epoch * len(train_loader) + step + 1)
                     writer.add_scalar("Train Loss (CLASS)", running_loss_sup, epoch * len(train_loader) + step + 1)
-                    writer.add_scalar("Train Loss (KD)", running_loss_kd, epoch * len(train_loader) + step + 1)
+                    writer.add_scalar("Train Loss (DISC)", running_loss_kd, epoch * len(train_loader) + step + 1)
                     writer.add_scalar("Learning rate", scheduler.get_last_lr()[0], epoch * len(train_loader) + step + 1)
 
-                    print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Learning rate: {scheduler.get_last_lr()[0]:.2e}, Train Loss (TOTAL): {running_loss:.4f}, Train Loss (MLM): {running_loss_mlm:.4f}, Train Loss (CLASS): {running_loss_sup:.4f}, Train Loss (KD): {running_loss_kd:.4f}")
+                    print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Learning rate: {scheduler.get_last_lr()[0]:.2e}, Train Loss (TOTAL): {running_loss:.4f}, Train Loss (MLM): {running_loss_mlm:.4f}, Train Loss (CLASS): {running_loss_sup:.4f}, Train Loss (DISC): {running_loss_kd:.4f}")
                 
                 running_loss = 0.0
                 running_loss_mlm = 0.0
@@ -117,6 +123,16 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                 # update the mask_prob 
                 if model.module.model_config.dynamic_maskprob:
                     model.module.model_config.mask_prob += mask_prob_step
+                    # constraint to not exceed end
+                    model.module.model_config.mask_prob = min(model.module.model_config.mask_prob, mask_prob_end)
+                
+                # update the reverse gradient weight 
+                if model.module.model_config.use_discriminator:
+                    model.module.model_config.lamb_reverse += lamb_reverse_step
+                    # contraint to not exceed end
+                    model.module.model_config.lamb_reverse = min(model.module.model_config.lamb_reverse, lamb_reverse_end)
+
+
                 # model evaluation and checkpoint saving
                 # only the first for evaluation
                 # if (global_rank == 0) & (checkpoint_counter == 10):
@@ -149,9 +165,10 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                             writer.add_scalar("Val Loss (TOTAL)", val_loss, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Val Loss (MLM)", val_loss_mlm, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Val Loss (CLASS)", val_loss_sup, epoch * len(train_loader) + step + 1)
-                            writer.add_scalar("Val Loss (KD)", val_loss_kd, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Val Loss (DISC)", val_loss_kd, epoch * len(train_loader) + step + 1)
                             writer.add_scalar("Mask prob", model.module.model_config.mask_prob, epoch * len(train_loader) + step + 1)
-                            print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (CLASS): {val_loss_sup:.4f}, Val Loss (KD): {val_loss_kd:.4f}")
+                            writer.add_scalar("Disc lamb", model.module.model_config.lamb_reverse, epoch * len(train_loader) + step + 1)
+                            print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (CLASS): {val_loss_sup:.4f}, Val Loss (DISC): {val_loss_kd:.4f}")
 
                             # save only for the writer gpu
                             save_checkpoint(epoch = epoch, step = step, model = model, optimizer = optimizer, scheduler = scheduler, loss = running_loss,
@@ -168,7 +185,6 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
         save_checkpoint(epoch = model.module.model_config.n_epoch, step = 0, model = model, optimizer = optimizer, scheduler = scheduler, loss = running_loss,
                         path = f"{model.module.model_config.checkpoint_path}{model.module.model_config.checkpoint_prefix}_{model.module.model_config.n_epoch}.pth")
         
-    
 
 def initialize_services(log_dir):
     writer = SummaryWriter(log_dir=log_dir)
@@ -198,7 +214,7 @@ def main():
     model_config = get_default_config()
     batch_size = 512
     # classifier for 4 gpus, 0.5e-5 too large for less than 4 
-    lr = 0.3e-5 * (batch_size/32)
+    lr = 0.3e-5 * (batch_size/32) # * (num_gpus/4)
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -210,18 +226,19 @@ def main():
                                   "n_layer": 6,
                                   "d_output": 64,
                                   "dropout": 0.05, # important for hyper-parameter tuning
-                                  "mask_prob": 0.4, # important for hyper-parameter tuning
-                                  "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
+                                  "mask_prob": 0.5, # important for hyper-parameter tuning
+                                  "dynamic_maskprob": False, # for fine-tunning, the maskprob is fixed to be max
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 100.0,
                                   "sup_type": "classifier-bincode",
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
-                                  "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
-                                  "lamb_disc": 0.0,
-                                  "pretrain_path": None,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint/",
-                                  "checkpoint_prefix": "checkpoint_6_512_classiunweight100"
+                                  "use_discriminator": True, # improve the cluster with discriminator, could be used for finetunning
+                                  "lamb_disc": 10.0,
+                                  # NOTE: for the unweight and weighted version, remember to update the state dict too.
+                                  "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_6_512_classiunweight100_1.pth",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_disc/",
+                                  "checkpoint_prefix": "checkpoint_6_512_classiunweight100_disc10"
                                   })
     
     # construct dataset
@@ -231,8 +248,6 @@ def main():
     scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
                                             ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
                                             batches = meta_dict["batch"], batch_size = model_config.batch_size)
-
-
 
     # train test split
     train_size = int(0.98 * len(scdataset))
@@ -275,24 +290,22 @@ def main():
         filtered_state_dict = {k: v for k, v in state["model_state_dict"].items() if k in fm_model.module.state_dict()}
         # Load the filtered state dictionary into the model
         fm_model.module.load_state_dict(filtered_state_dict, strict=False)
-
-        # NOTE: for continuous training, update optimizer and scheduler for consistent training
-        optimizer.load_state_dict(state['optimizer_state_dict'])
-        scheduler.load_state_dict(state["scheduler_state_dict"])
-        initial_epoch = state['epoch']
-        initial_step = state['step']
-        del state
     else:
-        initial_epoch = 0
-        initial_step = 0
         # If we couldn't find a model to preload, just start from scratch
         print(f'GPU {local_rank} - Could not find model to preload. Starting from scratch')
 
+    initial_epoch = 0
+    initial_step = 0
+
     if model_config.sup_type == "classifier-bincode":
         fm_model.module.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.int32)
+        # NOTE: for the unknown labels, include the label mask
+        fm_model.module.label_mask = torch.tensor((meta_dict["label_code"] == "unknown"), dtype = torch.float32)
 
-    # NOTE: for the unknown labels, include the label mask
-    fm_model.module.label_mask = torch.tensor((meta_dict["label_code"] == "unknown"), dtype = torch.float32)
+    else:
+        # NOTE: for the unknown labels, include the label mask
+        fm_model.module.label_mask = np.where(meta_dict["label_code"] == "unknown")[0][0]
+
 
     # Init logger process, only main thread
     if global_rank == 0:

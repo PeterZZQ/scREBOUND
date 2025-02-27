@@ -25,9 +25,12 @@ class ModelConfig:
     sup_type: str
 
     # prediction manner
-    sample_mlm: bool
     mlm_include_zero: bool
+
+    # remove batch effect
     deep_injection: bool
+    use_discriminator: bool
+    lamb_disc: float
 
     # paths
     checkpoint_path: str
@@ -52,9 +55,10 @@ def get_default_config() -> ModelConfig:
         dynamic_maskprob=False,
         lamb_kd=0.0,
         lamb_sup=1.0,
-        sample_mlm=False,
         mlm_include_zero=False,
         deep_injection=False,
+        use_discriminator=False,
+        lamb_disc=1.0,
         checkpoint_path="checkpoint/",
         checkpoint_prefix="checkpoint",
         sup_type="classifier"
@@ -138,62 +142,84 @@ class TransformerModel(nn.Module):
                                      full_block(self.model_config.d_output, self.model_config.d_output, self.model_config.dropout),
                                      nn.Linear(self.model_config.d_output, self.model_config.d_output))
         
-        if model_config.sample_mlm:
-            # expr_predictor: predict the masked out expression values from cell embedding and gene token
-            # cell embedding (batch, output_dim), gene_token (batch, n_token_dims) is the condition
-            self.expr_predictor = nn.Sequential(
-                full_block(self.model_config.d_output + self.model_config.d_embed + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
-                full_block(2048, 512, self.model_config.dropout),
-                full_block(512, 128, self.model_config.dropout),
-                nn.Linear(128, 1)
-            )
-        else:
-            # predict the expression of all meta-genes (mse only calculated on mask)
-            # original
-            # self.expr_predictor = nn.Sequential(
-            #     full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
-            #     full_block(2048, 512, self.model_config.dropout),
-            #     full_block(512, 128, self.model_config.dropout),
-            #     nn.Linear(128, self.n_tokens - 1) # remove the masked token (not in the original gene sentance)
-            # )
+        # predict the expression of all meta-genes (mse only calculated on mask)
+        # original
+        # self.expr_predictor = nn.Sequential(
+        #     full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
+        #     full_block(2048, 512, self.model_config.dropout),
+        #     full_block(512, 128, self.model_config.dropout),
+        #     nn.Linear(128, self.n_tokens - 1) # remove the masked token (not in the original gene sentance)
+        # )
 
-            # deep injection, same as the MLP above with the choice of deep injection
-            self.expr_predictor = base_model.decoder(
-                n_input = self.model_config.d_output,
-                n_output = self.n_tokens - 1,
-                n_cat_list = [self.n_batch],
-                n_layers = 4,
-                n_hidden = 512,
-                dropout_rate = self.model_config.dropout,
-                inject_covariates = self.model_config.deep_injection, # NOTE: True for deep injection
-                use_batch_norm = False,
-                use_layer_norm = True
-            )
+        # deep injection, same as the MLP above with the choice of deep injection
+        self.expr_predictor = base_model.decoder(
+            n_input = self.model_config.d_output,
+            n_output = self.n_tokens - 1,
+            n_cat_list = [self.n_batch],
+            n_layers = 4,
+            n_hidden = 512,
+            dropout_rate = self.model_config.dropout,
+            inject_covariates = self.model_config.deep_injection, # NOTE: True for deep injection
+            use_batch_norm = False,
+            use_layer_norm = True
+        )
 
-        if model_config.sup_type == "classifier":
+        if (model_config.sup_type == "classifier") | (model_config.sup_type == "classifier-bincode"):
             # NOTE: single class classifier and bincode classifier is of the same form
             # the loss is all that is different:
             # 1. single class classifier is one classifier, use cross-entropy loss
             # 2. bincode classifier is a parallel of self.n_label classifiers, BCEWithLogitsLoss should be used
-            self.classifier = nn.Sequential(
-                full_block(self.model_config.d_output, 2048, self.model_config.dropout), # no batch condition
-                full_block(2048, 512, self.model_config.dropout),
-                nn.Linear(512, self.n_label)            
-            )
-            
+
             if model_config.sup_type == "classifier-bincode":
+                self.classifier = nn.Sequential(
+                    full_block(self.model_config.d_output, 2048, self.model_config.dropout), # no batch condition
+                    nn.Linear(2048, self.n_label)            
+                )
                 # weights for self.n_label classifiers
-                self.classifier_weight = nn.Parameter(torch.randn(self.n_label))
+                # self.classifier_weight = nn.Parameter(torch.randn(self.n_label))
+                # BASELINE: weight for self.n_label classifiers, the same for all classes
+                self.classifier_weight = 1/self.n_label * torch.ones(self.n_label).to(self.device)
+
+            else:
+                self.classifier = nn.Sequential(
+                    full_block(self.model_config.d_output, 2048, self.model_config.dropout), # no batch condition
+                    full_block(2048, 512, self.model_config.dropout),
+                    nn.Linear(512, self.n_label)            
+                )
 
         else:
             self.classifier = None
+
+
+        # how to remove batch effect:
+        # method 1: metric learning to increase the cluster compactness, center loss, contrastive loss, etc. Difficulty is to deal with the cluster labels
+        # easier to implement, comdense the cell type didn't specifically remove the batch effect.
+
+        # method 2: use adversarial training, use discriminator to predict batch and model to fool the prediction, for each cluster separately
+        # need one discriminator for one cell type (a total of 600 discriminators), for each cell type, the corresponding discriminator predict the batch from the embedding
+        # and the model gradient is reversed to fool the discriminator. Or maybe we can use discriminator conditioned on cell types.
+        if model_config.use_discriminator:
+            self.discriminator = base_model.decoder(
+                    n_input = self.model_config.d_output,
+                    n_output = self.n_batch,
+                    n_cat_list = [self.n_label],
+                    n_layers = 2,
+                    n_hidden = 512,
+                    dropout_rate = self.model_config.dropout,
+                    inject_covariates = self.model_config.deep_injection, # NOTE: True for deep injection
+                    use_batch_norm = False,
+                    use_layer_norm = True            
+            )
+        else:
+            self.discriminator = None
+
 
         if teacher_params is not None:
             self.teacher_encoder = nn.Linear(sum(teacher_params["teacher_dims"]), self.model_config.d_output)
         
         self.to(self.device)
         
-    def forward(self, gene_sent: torch.Tensor, expr_sent: torch.Tensor):
+    def forward(self, gene_sent: torch.Tensor, expr_sent: torch.Tensor, mask: torch.Tensor | None = None):
         """
         Parameters:
         --------------
@@ -202,13 +228,15 @@ class TransformerModel(nn.Module):
         """
         # padding mask: position of the padding place
         padding_mask = (gene_sent == self.pad_idx)
-        # add mask to the input data
-        mask_prob = torch.full(gene_sent.shape, self.model_config.mask_prob).to(self.device)
-        # do not add mask on padding and cls positions
-        mask_prob[:, 0] = 0
-        mask_prob = mask_prob * (~ padding_mask)
-        # sample mask using bernoulli
-        mask = torch.bernoulli(mask_prob).bool()
+
+        if mask is None:
+            # add mask to the input data
+            mask_prob = torch.full(gene_sent.shape, self.model_config.mask_prob).to(self.device)
+            # do not add mask on padding and cls positions
+            mask_prob[:, 0] = 0
+            mask_prob = mask_prob * (~ padding_mask)
+            # sample mask using bernoulli
+            mask = torch.bernoulli(mask_prob).bool()
 
         # only place where mask_idx is used
         gene_sent_wmask = gene_sent.long()
@@ -250,15 +278,10 @@ class TransformerModel(nn.Module):
         else:
             # zero value for condition
             batch_embed = torch.zeros((cell_embed.shape[0], self.n_batch)).to(self.device)
-        if self.model_config.sample_mlm:
-            gene_embed = self.token_embed(gene_cond)
-            gene_embed = self.gene_encoder(gene_embed) * math.sqrt(self.model_config.d_embed)
-            expr_pred = self.expr_predictor(torch.hstack((cell_embed, gene_embed.squeeze(), batch_embed)))
-        else:
-            # original 
-            # expr_pred = self.expr_predictor(torch.hstack((cell_embed, batch_embed)))
-            # with deep injection
-            expr_pred = self.expr_predictor(cell_embed, batch_cond.reshape(-1,1))
+        # original 
+        # expr_pred = self.expr_predictor(torch.hstack((cell_embed, batch_embed)))
+        # with deep injection
+        expr_pred = self.expr_predictor(cell_embed, batch_cond.reshape(-1,1))
         return expr_pred
 
 
@@ -274,3 +297,22 @@ class TransformerModel(nn.Module):
         # mse between teacher embed and student embed
         loss_kd = nn.MSELoss()
         return loss_kd(teacher_embed, student_embed)
+
+
+
+
+from torch.autograd import Function
+# gradient reversal, necessary for discriminator training
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
+def gradient_reversal(x, alpha=1.0):
+    return GradientReversalFunction.apply(x, alpha)
+

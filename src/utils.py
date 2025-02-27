@@ -59,8 +59,9 @@ def plot_embeds(embed, annos, figsize = (20,10), axis_label = "Latent", label_in
 
         if isinstance(annos[anno_name].dtype, pd.CategoricalDtype):
             # categorical values
+            unique_anno = annos[anno_name].cat.categories
             anno = np.array(annos[anno_name].values)
-            unique_anno = np.unique(anno)
+            
             if _kwargs["colormap"] is None:
                 colormap = plt.cm.get_cmap("tab20b", len(unique_anno))
             else:

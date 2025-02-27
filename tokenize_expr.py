@@ -8,20 +8,37 @@ import scipy.sparse as sp
 import src.data_utils as data_utils
 import pandas as pd
 
+import sys
+sys.path.append("src")
+
+from data_utils import set_seed
+
 # In[]
 # ----------------------------------------------------------------------------
 #
 # Tokenize the gene expression data into sentences
 #
 # ----------------------------------------------------------------------------
+n_mgene = 256
+use_bin = True
+res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+
+gene_embed_dict = torch.load(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/gene_embed_meta{n_mgene}.pt", weights_only = False)
+# original esm is half precision, need to modify to full precision for training
+token_embed = gene_embed_dict["meta_embed"].to(torch.float32)
+# add the cls, mask, and padding tokens
+set_seed(0)
+special_tokens = torch.randn(3, token_embed.shape[1])
+token_embed = torch.concat([token_embed, special_tokens], dim = 0)
+torch.save(token_embed, res_dir / f"token_embed_{n_mgene}.pt")
+
+# In[]
 # for supervision
 labels = []
 batches = []
 
-n_mgene = 256
-res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
 tissue_list = ["all_remain", "pancreas", "blood", "brain", "heart", "intestine", "kidney", "lung"]
-tissue_list = ["pancreas"]
+# tissue_list = ["pancreas"]
 print("read gene expression...")
 # read in the anndata
 counts_norm = []
@@ -29,6 +46,9 @@ for tissue in tissue_list:
     print(tissue)
     data_dir = Path(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/{tissue}")
     adata = anndata.read_h5ad(data_dir / f"adata_meta{n_mgene}_4000hvg.h5ad")
+    # use bin data
+    if use_bin:
+        adata.X = adata.layers["counts_bin"].copy()
     sc.pp.normalize_total(adata, target_sum = 10e4, key_added = "libsize")
     sc.pp.log1p(adata)
 
@@ -66,7 +86,7 @@ if permute_cells:
 
 # Tokenize counts_norm
 print("tokenize the data")
-n_chunks = 1
+n_chunks = 4
 counts_norm_list = data_utils.divide_chunks(counts = counts_norm, nchunks = n_chunks)
 del counts_norm
 

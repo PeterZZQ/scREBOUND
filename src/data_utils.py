@@ -201,10 +201,15 @@ class sc_dataset_chunk(data.Dataset):
 
         if labels is not None:
             assert len(labels) == ncells
+            self.labels = labels
+        else:
+            self.labels = None
+            
         if batches is not None:
             assert len(batches) == ncells
-        self.labels = labels
-        self.batches = batches
+            self.batches = batches
+        else:
+            self.batches = None
 
         self.batch_size = batch_size
 
@@ -223,11 +228,11 @@ class sc_dataset_chunk(data.Dataset):
         sample = {"expr": expr, "gene": gene}
         if self.labels is not None:
             label = self.labels[start_idx:end_idx]
-            sample["label"] = label
+            sample["label"] = torch.tensor(label, dtype = torch.int32)
 
         if self.batches is not None:
             batch = self.batches[start_idx:end_idx]
-            sample["batch"] = batch
+            sample["batch"] = torch.tensor(batch, dtype = torch.int32)
 
         return sample
     
@@ -288,7 +293,7 @@ class sc_dataset_anndata(data.Dataset):
 
 
 
-def preprocess_anndata(adata, feature_df, var_name = "gene_name"):
+def preprocess_anndata(adata, feature_df, var_name = "gene_name", use_bin = False):
     """
     Group the genes into meta-genes in adata, according to the hard-coded grouping information
     """
@@ -305,10 +310,15 @@ def preprocess_anndata(adata, feature_df, var_name = "gene_name"):
     gene_ids = np.intersect1d(adata_s.var.index.values, gene_ids)
     adata_s = adata_s[:, gene_ids]
     print(f"overlapping genes: {len(gene_ids)}")
+
+    counts = adata_s.layers["counts"].toarray()
+    if use_bin:
+        counts = (counts > 0).astype(int)
+
     meta_labels = feature_df.loc[gene_ids, "labels"].values.squeeze()
     counts_meta = np.zeros((adata_s.shape[0], len(np.unique(feature_df["labels"].values))))
     for label in np.unique(meta_labels):
-        counts_meta[:, label] = adata_s.layers["counts"][:, meta_labels == label].toarray().sum(axis = 1)
+        counts_meta[:, label] = counts[:, meta_labels == label].sum(axis = 1)
     counts_meta = sp.csr_matrix(counts_meta)
     
     adata_meta = anndata.AnnData(X = counts_meta, obs = adata_s.obs)
