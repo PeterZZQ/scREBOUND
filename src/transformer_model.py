@@ -22,7 +22,7 @@ class ModelConfig:
     dynamic_maskprob: bool
     lamb_kd: float
     lamb_sup: float
-    sup_type: str
+    sup_type: str | None
 
     # prediction manner
     mlm_include_zero: bool

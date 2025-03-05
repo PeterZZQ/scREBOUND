@@ -18,22 +18,34 @@ def concat_all_gather(tensor):
     """
     Performs all_gather operation on the provided tensors.
     *** Warning ***: torch.distributed.all_gather has no gradient.
+    NOTE: requires that the tensor to be the same size across gpus, which is not true with the filtered samples
     """
     tensors_gather = [torch.ones_like(tensor)
-                      for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather(tensors_gather, tensor, async_op=False)
+                      for _ in range(dist.get_world_size())]
+    dist.all_gather(tensors_gather, tensor, async_op=False)
 
     output = torch.cat(tensors_gather, dim=0)
     return output
+
+
+def exact_equal(A, B):
+    result = torch.all(torch.eq(A[:, None, :], B[None, :, :]), dim=2) 
+    return result
+
+def full_equal(A, B):
+    return (A @ B.T) != 0
 
 class MultiPosConLoss(nn.Module):
     """
     Multi-Positive Contrastive Loss: https://arxiv.org/pdf/2306.00984.pdf
     """
 
-    def __init__(self, temperature=0.1):
+    def __init__(self,
+                 temperature: float = 0.1,
+                 use_bincode_label: bool = False):
         super(MultiPosConLoss, self).__init__()
         self.temperature = temperature
+        self.use_bincode_label = use_bincode_label
 
     def set_temperature(self, temp=0.1):
         self.temperature = temp
@@ -44,15 +56,27 @@ class MultiPosConLoss(nn.Module):
         features = nn.functional.normalize(features, dim=-1, p=2)
 
         # ground truth
-        labels = labels.contiguous().view(-1, 1)
-        mask = torch.eq(labels, labels.T).float().to(device)      
+        if self.use_bincode_label:
+             # NOTE: bincode label, use the binary vector
+            mask = exact_equal(labels, labels).float().to(device)
+            # full mask, bin_code label have common ancestor, larger number of positives
+            full_mask = full_equal(labels, labels).float().to(device)
+            # neutral mask: full mask except for the exact mask
+            neutral_mask = full_mask - mask
+        else:
+            # NOTE: the integer label, exactly the same
+            labels = labels.contiguous().view(-1, 1)
+            mask = torch.eq(labels, labels.T).float().to(device) 
+            full_mask = None
+            neutral_mask = None     
 
         if batchs is not None:
             # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
+            # positive sample only includes the samples of the same cell type across batchs, but should the samples of the same cell type within the same batch be negative samples?
             batchs = batchs.contiguous().view(-1, 1)
-            mask_batch = 1 - torch.eq(batchs, batchs.T).float().to(device)
-            # only drag the same cell type across batchs
-            mask = mask * mask_batch
+            mask_batch = torch.eq(batchs, batchs.T).float().to(device)
+            # neutral mask also include the cells of the same cell type and from the same batch
+            neutral_mask += mask * mask_batch
 
         # compute logits
         logits = torch.matmul(features, features.T) / self.temperature
@@ -61,16 +85,19 @@ class MultiPosConLoss(nn.Module):
         # optional: minus the largest logit to stablize logits
         logits = stablize_logits(logits)
 
-        # remove self-similarity
+        # NOTE: remove gradient calculation 
+        # 1. remove self-similarity
         mask.fill_diagonal_(0)  
-        logits.fill_diagonal_(0)
-
+        logits.fill_diagonal_(-1e9)
+        # 2. neutral mask
+        if neutral_mask is not None:
+            logits = logits - neutral_mask * 1e9
         # compute ground-truth distribution
         # for each sample, sum mask between the sample and all remaining samples, and clamp by 1 min to prevent 0 sum
         # more neighboring, more even the p is after normalization
         p = mask / mask.sum(1, keepdim=True).clamp(min=1.0)
 
-        # cross entropy loss, TODO: modified somehow to only incorporate the different batches ce? 
+        # cross entropy loss, select and calculate only on non-neutral mask 
         loss = compute_cross_entropy(p, logits)
 
         return loss
@@ -82,9 +109,12 @@ class MultiPosConLossMultiGPUs(nn.Module):
     Multi-Positive Contrastive Loss: https://arxiv.org/pdf/2306.00984.pdf
     """
 
-    def __init__(self, temperature=0.1):
+    def __init__(self,
+                 temperature: float = 0.1,
+                 use_bincode_label: bool = False):
         super(MultiPosConLossMultiGPUs, self).__init__()
         self.temperature = temperature
+        self.use_bincode_label = use_bincode_label
 
     def set_temperature(self, temp=0.1):
         self.temperature = temp
@@ -102,15 +132,27 @@ class MultiPosConLossMultiGPUs(nn.Module):
 
         # compute the mask based on labels
         # labels by all_labels mask, 1 for the same label, 0 for different label
-        mask = torch.eq(labels.view(-1, 1), all_labels.contiguous().view(1, -1)).float().to(device)
+
+        if self.use_bincode_label:
+            # NOTE: bincode label, use the binary vector
+            mask = exact_equal(labels, all_labels).float().to(device)
+            # full mask, bin_code label have common ancestor, larger number of positives
+            full_mask = full_equal(labels, all_labels).float().to(device)
+            # neutral mask: full mask except for the exact mask
+            neutral_mask = full_mask - mask
+        else:
+            # NOTE: the integer label, exactly the same
+            mask = torch.eq(labels.view(-1, 1), all_labels.contiguous().view(1, -1)).float().to(device)
+            full_mask = None
+            neutral_mask = None
 
         if batchs is not None:
             all_batchs = concat_all_gather(batchs)
             # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
             batchs = batchs.contiguous().view(-1, 1)
-            mask_batch = 1 - torch.eq(batchs.view(-1,1), all_batchs.contiguous().view(1, -1)).float().to(device)
-            # only drag the same cell type across batchs
-            mask = mask * mask_batch
+            mask_batch = torch.eq(batchs.view(-1,1), all_batchs.contiguous().view(1, -1)).float().to(device)
+            # neutral mask also include the cells of the same cell type and from the same batch
+            neutral_mask += mask * mask_batch
 
         # remove self-similarity, 0 for self-similarity
         logits_mask = torch.scatter(
@@ -120,24 +162,28 @@ class MultiPosConLossMultiGPUs(nn.Module):
             local_batch_size * dist.get_rank(),
             0
         )
-        mask = mask * logits_mask
 
-        # compute logits, set self-similarity to be -1e9, so that softmax produce 0
+        # NOTE: remove gradient calculation of certain logits 
+        # set self-similarity to be -1e9, so that softmax produce 0
         logits = torch.matmul(feats, all_feats.T) / self.temperature
-        logits = logits - (1 - logits_mask) * 1e9
-
         # optional: minus the largest logit to stablize logits
         logits = stablize_logits(logits)
 
+        mask = mask * logits_mask
+        logits = logits - (1 - logits_mask) * 1e9
+        # 2. neutral mask
+        if neutral_mask is not None:
+            logits = logits - neutral_mask * 1e9
+
         # compute ground-truth distribution
         p = mask / mask.sum(1, keepdim=True).clamp(min=1.0)
-        loss = compute_cross_entropy(p, logits)
 
+        # TODO: need to drop neutral for cross-entropy calculation in each cell
+        loss = compute_cross_entropy(p, logits)
         return loss
 
 
 
-import torch
 
 def bce_weighted(pred, target, weight = None, eps = 1e-12):
     """

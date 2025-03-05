@@ -55,7 +55,6 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
         lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / len(train_loader) / (model.module.model_config.n_epoch - initial_epoch) * log_step
         model.module.model_config.lamb_reverse = lamb_reverse_init
 
-
     # NOTE: training loop
     checkpoint_counter = 0
     for epoch in range(initial_epoch, model.module.model_config.n_epoch):
@@ -236,6 +235,7 @@ def main():
                                   "use_discriminator": True, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 10.0,
                                   # NOTE: for the unweight and weighted version, remember to update the state dict too.
+                                #   "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_6_512_classiunweight100_1.pth",
                                   "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_6_512_classiunweight100_1.pth",
                                   "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_disc/",
                                   "checkpoint_prefix": "checkpoint_6_512_classiunweight100_disc10"
@@ -271,6 +271,17 @@ def main():
 
     # model hyper-parameters
     fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
+
+    # update the model parameters
+    if model_config.sup_type == "classifier-bincode":
+        fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.int32) #.to(device) label_bincode is moved to device in infer_databatch
+        # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
+        # the 677th dimension
+        fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = torch.float32).to(device)
+    else:
+        # the third dimension
+        fm_model.label_mask = np.where(meta_dict["label_code"] == "unknown--unknown")[0][0]
+    
     # wrap model into multi-gpus setting
     fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
     # init optimizer and scheduler, learning rate scale with the batch_size
@@ -296,16 +307,6 @@ def main():
 
     initial_epoch = 0
     initial_step = 0
-
-    if model_config.sup_type == "classifier-bincode":
-        fm_model.module.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.int32)
-        # NOTE: for the unknown labels, include the label mask
-        fm_model.module.label_mask = torch.tensor((meta_dict["label_code"] == "unknown"), dtype = torch.float32)
-
-    else:
-        # NOTE: for the unknown labels, include the label mask
-        fm_model.module.label_mask = np.where(meta_dict["label_code"] == "unknown")[0][0]
-
 
     # Init logger process, only main thread
     if global_rank == 0:

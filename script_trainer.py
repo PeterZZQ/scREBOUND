@@ -38,6 +38,7 @@ def save_checkpoint(epoch, step, model, optimizer, scheduler, loss, path):
     }
     torch.save(checkpoint, path)
     print(f"Checkpoint saved at epoch {epoch}.")
+
 def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial_epoch, initial_step, log_step):
     # NOTE: dynamic masking probability, small to large
     if model.model_config.dynamic_maskprob:
@@ -72,9 +73,8 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                 continue
 
             # NOTE: need to process the label into bincode
-            if model.model_config.sup_type == "classifier-bincode":
-                label_sample = model.label_bincode[data_sample["label"],:]
-                data_sample["label"] = label_sample
+            if model.model_config.sup_type is not None:
+                data_sample["label"] = model.label_bincode[data_sample["label"],:]
 
             loss, loss_mlm, loss_sup, loss_kd = trainer.infer_databatch(model, data_sample, multigpus = False)
 
@@ -134,7 +134,7 @@ def train(model, train_loader, val_loader, optimizer, scheduler, writer, initial
                         val_loss_kd = 0.0
                         for data_sample in val_loader:
                             # NOTE: need to process the label into bincode
-                            if model.model_config.sup_type == "classifier-bincode":
+                            if model.module.model_config.sup_type is not None:
                                 label_sample = model.label_bincode[data_sample["label"],:]
                                 data_sample["label"] = label_sample
 
@@ -210,13 +210,13 @@ def main():
                                   "mask_prob": 0.5, # important for hyper-parameter tuning
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 100.0,
-                                  "sup_type": "classifier-bincode",
+                                  "sup_type": "contrastive",
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
-                                  "use_discriminator": True, # improve the cluster with discriminator, could be used for finetunning
-                                  "lamb_disc": 1.0,
+                                  "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
+                                  "lamb_disc": 0.0,
                                   "pretrain_path": None,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_predfull/",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/singlegpu/",
                                   "checkpoint_prefix": "checkpoint_0.3"
                                   })
 
@@ -242,14 +242,22 @@ def main():
     train_loader = data.DataLoader(train_dataset, batch_size = 1, shuffle = True, pin_memory = True, num_workers = 8, prefetch_factor = 8)
     val_loader = data.DataLoader(val_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
     test_loader = data.DataLoader(test_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8)
+
+    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.1)})
     print(f"GPU - Done.")
 
     # model hyper-parameters
     fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
+
+    # update the model parameters
+    fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.float32) #.to(device) label_bincode is moved to device in infer_databatch
+    # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
+    # the 677th dimension
+    fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = torch.float32).to(device)
+    
     # init optimizer and scheduler, learning rate scale with the batch_size
     optimizer = AdamW(fm_model.parameters(), lr = model_config.lr)
     # update the warm-up steps to be 10% of total steps
-    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.1)})
     scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = model_config.n_warmup_stp_lr, num_training_steps = model_config.n_epoch * len(train_loader))
 
     print(f"Linear scheduler with warmup, warmup steps: {model_config.n_warmup_stp_lr}, total steps: {model_config.n_epoch * len(train_loader)}, orig lr: {lr:.2e}")
@@ -275,14 +283,11 @@ def main():
         # If we couldn't find a model to preload, just start from scratch
         print(f'GPU - Could not find model to preload. Starting from scratch')
 
-    if model_config.sup_type == "classifier-bincode":
-        fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.int32)
-
     # Init logger process, only main thread
     writer = initialize_services(model_config.checkpoint_path + model_config.checkpoint_prefix) 
    
     train(model = fm_model, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
-          initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
+          initial_epoch = initial_epoch, initial_step = initial_step, log_step = 10)
 
 # In[]
 if __name__ == '__main__':

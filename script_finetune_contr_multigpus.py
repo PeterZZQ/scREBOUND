@@ -19,11 +19,14 @@ from transformers import AdamW, get_linear_schedule_with_warmup
 sys.path.append("./src")
 
 import data_utils
-from transformer_model import TransformerModel, get_default_config
+from transformer_model import TransformerModel, ModelConfig, get_default_config
 import trainer
+
 
 # TODO: update to wandb
 from torch.utils.tensorboard import SummaryWriter
+
+# Save model checkpoint
 
 def initialize_services(log_dir):
     writer = SummaryWriter(log_dir=log_dir)
@@ -53,7 +56,7 @@ def main():
     model_config = get_default_config()
     batch_size = 512
     # classifier for 4 gpus, 0.5e-5 too large for less than 4 
-    lr = 0.3e-5 * (batch_size/32)
+    lr = 0.3e-5 * (batch_size/32) # * (num_gpus/4)
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -65,38 +68,30 @@ def main():
                                   "n_layer": 6,
                                   "d_output": 64,
                                   "dropout": 0.05, # important for hyper-parameter tuning
-                                  "mask_prob": 0.4, # important for hyper-parameter tuning
-                                  "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
+                                  "mask_prob": 0.5, # important for hyper-parameter tuning
+                                  "dynamic_maskprob": False, # for fine-tunning, the maskprob is fixed to be max
                                   "lamb_kd": 0.0,
-                                  "lamb_sup": 10, # contrastive loss multigpus with sup >= 10 cause strong instability
+                                  "lamb_sup": 0.0,
                                   "sup_type": "contrastive",
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
-                                  "pretrain_path": None,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint/",
-                                  "checkpoint_prefix": "checkpoint_6_512_contr10"
+                                  "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_6_512_1.pth",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_contr/",
+                                  "checkpoint_prefix": "checkpoint_6_512_contr0"
                                   })
     
     # construct dataset
     # load the cell meta-info
     meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = False)
     # total number of batches is 604, maximum batch size is 2million, minimum batch size is 843
-    if model_config.sup_type is None:
-        scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
-                                                ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = None,
-                                                batches = meta_dict["batch"], batch_size = model_config.batch_size)
-
-    else:
-        scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
-                                                ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
-                                                batches = meta_dict["batch"], batch_size = model_config.batch_size)
-
-
+    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
+                                            ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
+                                            batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
     # train test split
-    train_size = int(0.98 * len(scdataset))
+    train_size = int(0.3 * len(scdataset))
     val_size = int(0.004 * len(scdataset))
 
     # the data is already pre-shuffled
@@ -117,16 +112,15 @@ def main():
 
     # model hyper-parameters
     fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
-    
-    # update the model parameters
+
     # update the model parameters
     fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.float32) #.to(device) label_bincode is moved to device in infer_databatch
     # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
     # the 677th dimension
     fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = torch.float32).to(device)
 
-
-    # wrap model into multi-gpus setting
+    
+    # wrap model into multi-gpus setting, NOTE: need to use local_rank
     fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
     # init optimizer and scheduler, learning rate scale with the batch_size
     optimizer = AdamW(fm_model.parameters(), lr = model_config.lr)
@@ -145,19 +139,12 @@ def main():
         filtered_state_dict = {k: v for k, v in state["model_state_dict"].items() if k in fm_model.module.state_dict()}
         # Load the filtered state dictionary into the model
         fm_model.module.load_state_dict(filtered_state_dict, strict=False)
-
-        # NOTE: for continuous training, update optimizer and scheduler for consistent training
-        optimizer.load_state_dict(state['optimizer_state_dict'])
-        scheduler.load_state_dict(state["scheduler_state_dict"])
-        initial_epoch = state['epoch']
-        initial_step = state['step']
-        del state
     else:
-        initial_epoch = 0
-        initial_step = 0
         # If we couldn't find a model to preload, just start from scratch
         print(f'GPU {global_rank} - Could not find model to preload. Starting from scratch')
 
+    initial_epoch = 0
+    initial_step = 0
 
     # Init logger process, only main thread
     if global_rank == 0:
@@ -179,8 +166,7 @@ if __name__ == '__main__':
     num_gpus = torch.cuda.device_count()
     print(f"Number of available GPUs: {num_gpus}")
     # environment variables generated when use torchrun
-    # same for single-node case:
-    # local gpu id within the machine/node
+    # local gpu id within the machine
     local_rank = int(os.environ['LOCAL_RANK'])
     # global gpu id across machines (uniq), same as local with one machine/node, for printing (only on one gpu)
     global_rank = int(os.environ['RANK'])
