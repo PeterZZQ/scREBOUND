@@ -5,6 +5,8 @@ import math
 from dataclasses import dataclass
 import base_model
 
+from FlashTransformerEncoder import FlashTransformerEncoderLayer
+
 @dataclass
 class ModelConfig:
 
@@ -130,7 +132,11 @@ class TransformerModel(nn.Module):
         # 2 ways to combine expr_embed and gene_embed, sum or concatenation
         # Construct the transformer layers, use torch transform directly, or use transformer in base_model.py
         # n_hidden = 2048, n_embed = 512
-        encoder_layers = nn.TransformerEncoderLayer(d_model = self.model_config.d_embed, 
+        # encoder_layers = nn.TransformerEncoderLayer(d_model = self.model_config.d_embed, 
+        #                                             nhead = self.model_config.n_head,
+        #                                             dim_feedforward = self.model_config.d_hidden,
+        #                                             dropout = self.model_config.dropout)
+        encoder_layers = FlashTransformerEncoderLayer(d_model = self.model_config.d_embed, 
                                                     nhead = self.model_config.n_head,
                                                     dim_feedforward = self.model_config.d_hidden,
                                                     dropout = self.model_config.dropout)
@@ -272,6 +278,7 @@ class TransformerModel(nn.Module):
 
 
     def predict_expr(self, cell_embed, gene_cond, batch_cond):
+        cell_embed = cell_embed.half()
         # obtain the gene name embedding given the gene_cond
         if batch_cond is not None:
             batch_embed = one_hot(batch_cond.reshape(-1,1), self.n_batch)
