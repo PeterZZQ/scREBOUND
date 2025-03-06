@@ -213,28 +213,30 @@ meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = F
 # ------------------------------Update for the model selected---------------------------------------------------
 # NOTE: 1. vanilla model with only mlm loss
 # vanilla mlm model
-model_name = "checkpoint_6_512_1"
+model_name = "checkpoint_8_512_1"
 # pretrained classification model
 # model_name = "checkpoint_6_512_classi100_1"
 # model_name = "checkpoint_6_512_classiunweight100_1"
-model_dir = f"/project/zzhang834/LLM_KD/checkpoint/{model_name}.pth"
-res_dir = f"results/{model_name}/"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_fastatten/{model_name}.pth"
+res_dir = f"results_fastatten/{model_name}/"
 
 # # fine-tuned model
 # model_name = "checkpoint_6_512_classiunweight100_disc10_1"
 # model_dir = f"/project/zzhang834/LLM_KD/checkpoint_disc/{model_name}.pth"
 # res_dir = f"results/finetune_disc/{model_name}/"
 
-model_name = "checkpoint_6_512_contr10_1"
-model_name = "checkpoint_6_512_contr0_1"
-model_dir = f"/project/zzhang834/LLM_KD/checkpoint_contr/{model_name}.pth"
-res_dir = f"results/finetune_contr/{model_name}/"
+# model_name = "checkpoint_6_512_contr0_1"
+# model_name = "checkpoint_6_512_contr10_1"
+# model_name = "checkpoint_6_512_contrcb10_1"
+# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_contr/{model_name}.pth"
+
+# res_dir = f"results/finetune_contr/{model_name}/"
 
 state = torch.load(model_dir, weights_only = False)
 model_config = state["model_config"]
-model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir, "use_discriminator": False, "lamb_disc": 0.0})
+# model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir, "use_discriminator": False, "lamb_disc": 0.0})
 
-# model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
+model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
 # ------------------------------------------------------------------------------------------------------------------
 
 
@@ -337,9 +339,9 @@ scores4["dataset"] = "Pancreas-training"
 scores = pd.concat([scores1, scores2, scores3, scores4], axis = 0, ignore_index = True)
 scores.to_csv(res_dir + "scores_scib.csv")
 
-if fm_model.model_config.sup_type is None:
-    # no further test needed
-    assert False
+# if fm_model.model_config.sup_type is None:
+#     # no further test needed
+assert False
 
 # In[]
 # ------------------------------------------------------------------------------------------------------------------------

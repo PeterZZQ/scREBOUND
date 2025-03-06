@@ -14,6 +14,9 @@ import tqdm
 from torch.nn.utils import clip_grad_norm_
 import torch.distributed as dist
 
+# for fp16 training
+from torch.amp import autocast, GradScaler
+
 def infer_databatch(model, data_sample, multigpus: bool = True):
         """
         Description:
@@ -157,15 +160,8 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
             expr_sample = data_sample["expr"].squeeze(0).to(model_acc.device, non_blocking = True)
             gene_sample = data_sample["gene"].squeeze(0).to(model_acc.device, non_blocking = True)
 
-            # NOTE: DEBUGGING, design mask
-            mask_genes = torch.tensor([95, 244, 137, 51, 117, 106, 73, 46, 59, 71, 43, 0, 99, 143, 120, 239, 212, 198, 230, 76]).to(model_acc.device)
-            # mask_genes = torch.tensor([95, 244, 137, 51, 117, 0, 99, 143, 120]).to(model_acc.device)
-            # mask_genes = torch.tensor([277]).to(model_acc.device)
-            mask = torch.isin(gene_sample, mask_genes)
-            # mask = None
-
             # Forward pass
-            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample, mask = mask)
+            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample, mask = None)
             # assert mask.sum() == 0
             cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
 
@@ -186,7 +182,6 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
     adata = anndata.AnnData(X = cell_embeds, obs = meta.astype("category"))
 
     return adata
-
 
 
 
@@ -332,6 +327,176 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
                             val_loss_mlm += loss_mlm.item()
                             val_loss_sup += loss_sup.item()
                             val_loss_kd += loss_kd.item()
+
+                        # log the values
+                        val_loss /= len(val_loader)
+                        val_loss_mlm /= len(val_loader)
+                        val_loss_sup /= len(val_loader)
+                        val_loss_kd /= len(val_loader)
+                        if writer is not None:
+                            writer.add_scalar("Val Loss (TOTAL)", val_loss, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Val Loss (MLM)", val_loss_mlm, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Val Loss (CLASS)", val_loss_sup, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Val Loss (DISC)", val_loss_kd, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Mask prob", model.module.model_config.mask_prob, epoch * len(train_loader) + step + 1)
+                            writer.add_scalar("Disc lamb", model.module.model_config.lamb_reverse, epoch * len(train_loader) + step + 1)
+                            print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (CLASS): {val_loss_sup:.4f}, Val Loss (DISC): {val_loss_kd:.4f}")
+
+                            # save only for the writer gpu
+                            save_checkpoint(epoch = epoch, step = step, model = model, optimizer = optimizer, scheduler = scheduler, loss = running_loss,
+                                            path = f"{model.module.model_config.checkpoint_path}{model.module.model_config.checkpoint_prefix}_{epoch}_{step}.pth")
+                    
+                    checkpoint_counter = 0                
+                # sync all gpus after eval
+                dist.barrier()
+               
+            initial_step = 0
+
+    # save the final model, also only for the writer gpu
+    if writer is not None:
+        save_checkpoint(epoch = model.module.model_config.n_epoch, step = 0, model = model, optimizer = optimizer, scheduler = scheduler, loss = running_loss,
+                        path = f"{model.module.model_config.checkpoint_path}{model.module.model_config.checkpoint_prefix}_{model.module.model_config.n_epoch}.pth")
+        
+
+def train_multigpus_fastatten(model, global_rank, train_loader, val_loader, optimizer, scheduler, writer, initial_epoch, initial_step, log_step):
+    """
+    Description:
+    ------------
+        The training function of foundation model
+
+    Parameters:
+    ------------
+        model: transformer model
+        train_loader: the training data loader
+        val_loader: the validation data loader
+        optimizer: the optimizer of the model
+        scheduler: the scheduler of the model
+        writer: the tensorboard writer
+        TODO: ADD
+    """
+    scaler = GradScaler()
+
+    # NOTE: dynamic masking probability, small to large
+    if model.module.model_config.dynamic_maskprob:
+        mask_prob_init = 0.2
+        mask_prob_end = 0.5
+        mask_prob_step = (mask_prob_end - mask_prob_init) / len(train_loader) / (model.module.model_config.n_epoch - initial_epoch) * log_step
+        model.module.model_config.mask_prob = mask_prob_init
+    
+    if model.module.model_config.use_discriminator:
+        lamb_reverse_init = 1.0 # the lamb_reverse is static
+        lamb_reverse_end = 1.0
+        lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / len(train_loader) / (model.module.model_config.n_epoch - initial_epoch) * log_step
+        model.module.model_config.lamb_reverse = lamb_reverse_init
+    else:
+        model.module.model_config.lamb_reverse = 0.0
+
+    # NOTE: training loop
+    checkpoint_counter = 0
+    # with torch.nn.attention.sdpa_kernel(enable_flash=True, enable_math=False, enable_mem_efficient=False):
+    torch.backends.cuda.enable_flash_sdp(True)
+    torch.backends.cuda.enable_mem_efficient_sdp(True)
+    torch.backends.cuda.enable_math_sdp(True)
+    for epoch in range(initial_epoch, model.module.model_config.n_epoch):
+        torch.cuda.empty_cache()
+        # Disable tqdm on all nodes except the rank 0 GPU on each server
+        batch_iterator = tqdm.tqdm(train_loader, desc=f"Processing Epoch {epoch:02d} on rank {global_rank}", disable = global_rank != 0)
+
+        # NOTE: Training
+        running_loss = 0.0
+        running_loss_mlm = 0.0
+        running_loss_sup = 0.0
+        running_loss_kd = 0.0      
+
+        for step, data_sample in enumerate(batch_iterator):
+            model.module.train()
+            with autocast(device_type="cuda", dtype=torch.bfloat16):
+                if step < initial_step:
+                    continue
+
+                # NOTE: need to process the label into bincode
+                if model.module.model_config.sup_type is not None:
+                    data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
+
+                loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)
+
+            optimizer.zero_grad()
+            scaler.scale(loss).backward()
+
+            #Unscale the optimizer to clip gradients
+            scaler.unscale_(optimizer)
+            # clip gradient
+            max_grad_norm = 10.0 
+            clip_grad_norm_(model.module.parameters(), max_grad_norm)
+
+            scaler.step(optimizer)
+            scaler.update()
+            scheduler.step()
+
+            # NOTE: log the results
+            running_loss += loss.item()
+            running_loss_mlm += loss_mlm.item()
+            running_loss_sup += loss_sup.item()
+            running_loss_kd += loss_kd.item()
+            
+            if step % log_step == log_step - 1:
+                interval = (step % log_step)
+                running_loss /= interval
+                running_loss_mlm /= interval
+                running_loss_sup /= interval
+                running_loss_kd /= interval
+                # NOTE: writer is not None only when global_rank == 0, make sure only one thread write the result
+                if writer is not None:
+                    writer.add_scalar("Train Loss (TOTAL)", running_loss, epoch * len(train_loader) + step + 1)
+                    writer.add_scalar("Train Loss (MLM)", running_loss_mlm, epoch * len(train_loader) + step + 1)
+                    writer.add_scalar("Train Loss (CLASS)", running_loss_sup, epoch * len(train_loader) + step + 1)
+                    writer.add_scalar("Train Loss (DISC)", running_loss_kd, epoch * len(train_loader) + step + 1)
+                    writer.add_scalar("Learning rate", scheduler.get_last_lr()[0], epoch * len(train_loader) + step + 1)
+
+                    print(f"Epoch: {epoch}, Step: {step + 1}/{len(train_loader)}, Learning rate: {scheduler.get_last_lr()[0]:.2e}, Train Loss (TOTAL): {running_loss:.4f}, Train Loss (MLM): {running_loss_mlm:.4f}, Train Loss (CLASS): {running_loss_sup:.4f}, Train Loss (DISC): {running_loss_kd:.4f}")
+                
+                running_loss = 0.0
+                running_loss_mlm = 0.0
+                running_loss_sup = 0.0
+                running_loss_kd = 0.0
+
+                checkpoint_counter += 1
+
+                # update the mask_prob 
+                if model.module.model_config.dynamic_maskprob:
+                    model.module.model_config.mask_prob += mask_prob_step
+                    # constraint to not exceed end
+                    model.module.model_config.mask_prob = min(model.module.model_config.mask_prob, mask_prob_end)
+                
+                # update the reverse gradient weight 
+                if model.module.model_config.use_discriminator:
+                    model.module.model_config.lamb_reverse += lamb_reverse_step
+                    # contraint to not exceed end
+                    model.module.model_config.lamb_reverse = min(model.module.model_config.lamb_reverse, lamb_reverse_end)
+
+
+                # model evaluation and checkpoint saving
+                # only the first for evaluation
+                # if (global_rank == 0) & (checkpoint_counter == 10):
+                # all gpus for evalution                
+                if (checkpoint_counter == 10):
+                    model.module.eval()
+                    with torch.no_grad():
+                        val_loss = 0.0
+                        val_loss_mlm = 0.0
+                        val_loss_sup = 0.0
+                        val_loss_kd = 0.0
+                        for data_sample in val_loader:
+                            with autocast(device_type="cuda", dtype=torch.bfloat16):
+                                # NOTE: need to process the label into bincode
+                                if model.module.model_config.sup_type is not None:
+                                    data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
+
+                                loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)                            
+                                val_loss += loss.item()
+                                val_loss_mlm += loss_mlm.item()
+                                val_loss_sup += loss_sup.item()
+                                val_loss_kd += loss_kd.item()
 
                         # log the values
                         val_loss /= len(val_loader)

@@ -12,7 +12,7 @@ sys.path.append("./src/")
 import utils
 import eval
 
-
+import data_utils
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -25,12 +25,28 @@ feature_info = gene_embed_dict["labels"]
 # adata_test = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/blood/partition_10.h5ad")
 # adata_test.layers["counts"] = adata_test.X.copy()
 
-adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
-adata_test_meta2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
-adata_test_meta3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
-adata_test_meta1.X = adata_test_meta1.layers["counts"].copy()
-adata_test_meta2.X = adata_test_meta2.layers["counts"].copy()
-adata_test_meta3.X = adata_test_meta3.layers["counts"].copy()
+adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
+adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
+# adata_test_meta1.write_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
+
+adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
+adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
+# adata_test_meta2.write_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
+
+adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
+adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
+# adata_test_meta3.write_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
+
+# adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
+# adata_test_meta2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
+# adata_test_meta3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
+
+
+# take out the pancreas dataset
+adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
+sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
+sc.pp.log1p(adata_pancreas)
+adata_test_meta4 = adata_pancreas
 
 
 # In[]

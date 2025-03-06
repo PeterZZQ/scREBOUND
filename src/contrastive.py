@@ -74,9 +74,12 @@ class MultiPosConLoss(nn.Module):
             # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
             # positive sample only includes the samples of the same cell type across batchs, but should the samples of the same cell type within the same batch be negative samples?
             batchs = batchs.contiguous().view(-1, 1)
-            mask_batch = torch.eq(batchs, batchs.T).float().to(device)
+            mask_batch = torch.eq(batchs, batchs.T).float().to(device) * mask
+            mask_batch.fill_diagonal_(0)
             # neutral mask also include the cells of the same cell type and from the same batch
-            neutral_mask += mask * mask_batch
+            neutral_mask += mask_batch
+            # also need to update the mask
+            mask = mask * (1 - mask_batch)
 
         # compute logits
         logits = torch.matmul(features, features.T) / self.temperature
@@ -146,14 +149,6 @@ class MultiPosConLossMultiGPUs(nn.Module):
             full_mask = None
             neutral_mask = None
 
-        if batchs is not None:
-            all_batchs = concat_all_gather(batchs)
-            # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
-            batchs = batchs.contiguous().view(-1, 1)
-            mask_batch = torch.eq(batchs.view(-1,1), all_batchs.contiguous().view(1, -1)).float().to(device)
-            # neutral mask also include the cells of the same cell type and from the same batch
-            neutral_mask += mask * mask_batch
-
         # remove self-similarity, 0 for self-similarity
         logits_mask = torch.scatter(
             torch.ones_like(mask),
@@ -169,7 +164,19 @@ class MultiPosConLossMultiGPUs(nn.Module):
         # optional: minus the largest logit to stablize logits
         logits = stablize_logits(logits)
 
+        # remove self-similarity
         mask = mask * logits_mask
+
+        if batchs is not None:
+            all_batchs = concat_all_gather(batchs)
+            # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
+            batchs = batchs.contiguous().view(-1, 1)
+            mask_batch = torch.eq(batchs.view(-1,1), all_batchs.contiguous().view(1, -1)).float().to(device) * mask
+            # neutral mask also include the cells of the same cell type and from the same batch
+            neutral_mask += mask_batch
+            # also need to update the mask
+            mask = mask * (1 - mask_batch)
+
         logits = logits - (1 - logits_mask) * 1e9
         # 2. neutral mask
         if neutral_mask is not None:

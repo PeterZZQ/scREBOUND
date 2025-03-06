@@ -210,7 +210,7 @@ def main():
                                   "mask_prob": 0.5, # important for hyper-parameter tuning
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 100.0,
-                                  "sup_type": "contrastive",
+                                  "sup_type": "contrastive-cb",
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning

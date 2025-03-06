@@ -119,7 +119,6 @@ def main():
     fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
     
     # update the model parameters
-    # update the model parameters
     fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.float32) #.to(device) label_bincode is moved to device in infer_databatch
     # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
     # the 677th dimension

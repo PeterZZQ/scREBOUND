@@ -65,21 +65,22 @@ def main():
                                   "d_embed": 512,
                                   "n_head": 8,  # TODO: make 12 head * 64 dimensions
                                   "d_hidden": 2048, 
-                                  "n_layer": 6,
+                                  "n_layer": 8,
                                   "d_output": 64,
                                   "dropout": 0.05, # important for hyper-parameter tuning
                                   "mask_prob": 0.5, # important for hyper-parameter tuning
                                   "dynamic_maskprob": False, # for fine-tunning, the maskprob is fixed to be max
                                   "lamb_kd": 0.0,
-                                  "lamb_sup": 0.0,
+                                  "lamb_sup": 10.0,
                                   "sup_type": "contrastive",
                                   "mlm_include_zero": False,
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
-                                  "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint/checkpoint_6_512_1.pth",
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_contr/",
-                                  "checkpoint_prefix": "checkpoint_6_512_contr0"
+                                  "use_fastatten": True,
+                                  "pretrain_path": "/project/zzhang834/LLM_KD/checkpoint_fastatten/checkpoint_8_512_1.pth",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_contr_fastatten/",
+                                  "checkpoint_prefix": "checkpoint_8_512_contr10"
                                   })
     
     # construct dataset
@@ -91,7 +92,7 @@ def main():
                                             batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
     # train test split
-    train_size = int(0.3 * len(scdataset))
+    train_size = int(0.98 * len(scdataset))
     val_size = int(0.004 * len(scdataset))
 
     # the data is already pre-shuffled
@@ -154,9 +155,12 @@ def main():
 
     # sync
     dist.barrier()
-
-    trainer.train_multigpus(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
-                            initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
+    if model_config.use_fastatten:
+        trainer.train_multigpus_fastatten(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
+                                      initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
+    else:
+        trainer.train_multigpus(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
+                                initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
 
                     
 

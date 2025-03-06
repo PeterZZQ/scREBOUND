@@ -34,6 +34,9 @@ class ModelConfig:
     use_discriminator: bool
     lamb_disc: float
 
+    # model stats
+    use_fastatten: bool
+
     # paths
     checkpoint_path: str
     checkpoint_prefix: str
@@ -61,9 +64,10 @@ def get_default_config() -> ModelConfig:
         deep_injection=False,
         use_discriminator=False,
         lamb_disc=1.0,
+        use_fastatten=False,
         checkpoint_path="checkpoint/",
         checkpoint_prefix="checkpoint",
-        sup_type="classifier"
+        sup_type="classifier",
     )
 
 
@@ -132,14 +136,20 @@ class TransformerModel(nn.Module):
         # 2 ways to combine expr_embed and gene_embed, sum or concatenation
         # Construct the transformer layers, use torch transform directly, or use transformer in base_model.py
         # n_hidden = 2048, n_embed = 512
-        # encoder_layers = nn.TransformerEncoderLayer(d_model = self.model_config.d_embed, 
-        #                                             nhead = self.model_config.n_head,
-        #                                             dim_feedforward = self.model_config.d_hidden,
-        #                                             dropout = self.model_config.dropout)
-        encoder_layers = FlashTransformerEncoderLayer(d_model = self.model_config.d_embed, 
-                                                    nhead = self.model_config.n_head,
-                                                    dim_feedforward = self.model_config.d_hidden,
-                                                    dropout = self.model_config.dropout)
+        if model_config.use_fastatten:
+            # NOTE: need to use mixed precision
+            encoder_layers = FlashTransformerEncoderLayer(d_model = self.model_config.d_embed, 
+                                                        nhead = self.model_config.n_head,
+                                                        dim_feedforward = self.model_config.d_hidden,
+                                                        dropout = self.model_config.dropout)
+            
+        else:
+            encoder_layers = nn.TransformerEncoderLayer(d_model = self.model_config.d_embed, 
+                                                        nhead = self.model_config.n_head,
+                                                        dim_feedforward = self.model_config.d_hidden,
+                                                        dropout = self.model_config.dropout)
+
+        
         self.transformer_encoder = nn.TransformerEncoder(encoder_layers, model_config.n_layer)
 
         # transform the output of the transformer m_embed -> output_dim
