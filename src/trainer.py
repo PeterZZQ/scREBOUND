@@ -161,7 +161,7 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
             gene_sample = data_sample["gene"].squeeze(0).to(model_acc.device, non_blocking = True)
 
             # Forward pass
-            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample, mask = None)
+            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
             # assert mask.sum() == 0
             cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
 

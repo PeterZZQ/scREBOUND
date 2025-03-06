@@ -51,8 +51,8 @@ adata_test_meta4 = adata_pancreas
 
 # In[]
 # Run scVI
-adata_test = adata_test_meta2
-BATCH_KEY = "tech"
+adata_test = adata_test_meta3
+BATCH_KEY = "dataset"
 
 scvi.settings.seed = 0
 # NOTE: Step 1, Train scVI on reference scRNA-seq dataset
@@ -71,8 +71,8 @@ sc.pp.neighbors(adata_test, use_rep = SCVI_LATENT_KEY)
 sc.tl.umap(adata_test)
 
 # adata_test.write_h5ad("results/scvi/adata_immune_all.h5ad")
-adata_test.write_h5ad("results/scvi/adata_pancreas.h5ad")
-# adata_test.write_h5ad("results/scvi/adata_lung.h5ad")
+# adata_test.write_h5ad("results/scvi/adata_pancreas.h5ad")
+adata_test.write_h5ad("results/scvi/adata_lung.h5ad")
 
 
 # In[]
