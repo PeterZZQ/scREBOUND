@@ -14,17 +14,13 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils import data
 from transformers import AdamW, get_linear_schedule_with_warmup
-
-# for fp16 training
-from torch.amp import autocast, GradScaler
+from torch.optim.lr_scheduler import OneCycleLR
 
 sys.path.append("./src")
 
 import data_utils
-from transformer_model import TransformerModel, ModelConfig, get_default_config
-import trainer
-
-from torch.nn.utils import clip_grad_norm_
+from transformer_model import TransformerModel, get_default_config
+import trainer_mixprec as trainer
 
 # TODO: update to wandb
 from torch.utils.tensorboard import SummaryWriter
@@ -46,18 +42,12 @@ def main():
     print(f"GPU {local_rank} - Loading dataset...")
 
     n_mgene = 256
-    # NOTE: save in localscratch for faster memory access
-    # no hvgs
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
-    # top 4000 hvgs
-    # data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_4000hvg")
-    # load the token embedding
-    token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False)
-
     model_config = get_default_config()
     batch_size = 512
-    # classifier for 4 gpus, 0.5e-5 too large for less than 4 
-    lr = 0.3e-5 * (batch_size/32)
+    # classifier for 4 gpus, 0.5e-5 too large for less than 4, slightly larger for bp16
+    lr = 0.5e-5 * (batch_size/32)
+
+    PRECISION = torch.float32
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -66,33 +56,43 @@ def main():
                                   "d_embed": 512,
                                   "n_head": 8,  # TODO: make 12 head * 64 dimensions
                                   "d_hidden": 2048, 
-                                  "n_layer": 8,
+                                  "n_layer": 6,
                                   "d_output": 64,
-                                  "dropout": 0.05, # important for hyper-parameter tuning
+                                  "dropout": 0.1, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
                                   "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 0.0,
                                   "sup_type": None,
                                   "mlm_include_zero": False,
+                                  "count_mode": "continuous",
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
-                                  "use_fastatten": True,
+                                  "use_fastatten": False,
                                   "pretrain_path": None,
-                                  "checkpoint_path":"/project/zzhang834/LLM_KD/checkpoint_fastatten/",
-                                  "checkpoint_prefix": "checkpoint_8_512",
+                                  "precision": PRECISION,
+                                  "checkpoint_path":"/project/zzhang834/LLM_KD/checkpoint_mixprec/",
+                                  "checkpoint_prefix": "checkpoint_6_512",
                                   })
-    
+
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+    # load the token embedding
+    token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False).to(model_config.precision)
+
     # construct dataset
     # load the cell meta-info
     meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = False)
     # total number of batches is 604, maximum batch size is 2million, minimum batch size is 843
-    scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
-                                            ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
-                                            batches = meta_dict["batch"], batch_size = model_config.batch_size)
+    if model_config.sup_type is None:
+        scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
+                                                ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = None,
+                                                batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
-
+    else:
+        scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
+                                                ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
+                                                batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
     # train test split
     train_size = int(0.98 * len(scdataset))
@@ -111,24 +111,25 @@ def main():
     test_loader = data.DataLoader(test_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8)
 
     # update the warm-up steps to be 10% of total steps, make suret that model_config is consistent with fm_model configuration
-    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.2)})
+    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.1)})
     print(f"GPU {local_rank} - Done.")
 
     # model hyper-parameters
     fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
 
     # update the model parameters
-    fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.float32) #.to(device) label_bincode is moved to device in infer_databatch
+    fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = model_config.precision) #.to(device) label_bincode is moved to device in infer_databatch
     # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
     # the 677th dimension
-    fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = torch.float32).to(device)
+    fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = model_config.precision).to(device)
 
     # wrap model into multi-gpus setting
     fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
-    # init optimizer and scheduler, learning rate scale with the batch_size
-    optimizer = AdamW(fm_model.parameters(), lr = model_config.lr)
+    # init optimizer and scheduler, learning rate scale with the batch_size, larger eps for more stability in bf16
+    optimizer = AdamW(fm_model.parameters(), lr = model_config.lr, eps = 1e-6)
 
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = model_config.n_warmup_stp_lr, num_training_steps = model_config.n_epoch * len(train_loader))
+    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = model_config.n_warmup_stp_lr, num_training_steps = model_config.n_epoch * len(train_loader))
+    scheduler = OneCycleLR(optimizer, max_lr = model_config.lr, steps_per_epoch = len(train_loader), epochs = model_config.n_epoch, pct_start = 0.3)
 
     if global_rank == 0:
         print(f"Linear scheduler with warmup, warmup steps: {model_config.n_warmup_stp_lr}, total steps: {model_config.n_epoch * len(train_loader)}, orig lr: {lr:.2e}")
@@ -155,12 +156,6 @@ def main():
         # If we couldn't find a model to preload, just start from scratch
         print(f'GPU {local_rank} - Could not find model to preload. Starting from scratch')
 
-    if model_config.sup_type == "classifier-bincode":
-        fm_model.module.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.int32)
-
-    # NOTE: for the unknown labels, include the label mask
-    fm_model.module.label_mask = torch.tensor((meta_dict["label_code"] == "unknown"), dtype = torch.float32).to(device)
-
     # Init logger process, only main thread
     if global_rank == 0:
         writer = initialize_services(model_config.checkpoint_path + model_config.checkpoint_prefix) 
@@ -170,8 +165,8 @@ def main():
     # sync
     dist.barrier()
 
-    trainer.train_multigpus_fastatten(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
-                                      initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
+    trainer.train_multigpus(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
+                            initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
 
                     
 

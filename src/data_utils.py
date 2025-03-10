@@ -81,13 +81,17 @@ def expr_binning(counts, nbins = 50):
     counts_bin = np.vstack(counts_bin)
     return sp.csr_matrix(counts_bin)
 
-def cell_sentance_const(counts, npads = None):
+def cell_sentance_const(counts: np.ndarray,
+                        drop_zerocount: bool = True,
+                        npads: int | None = None
+                        ):
     ncells, nfeats = counts.shape
+
     if npads is None:
-        # the padded length should include at leat the cls token
-        npads = nfeats + 1
-    else:
-        assert nfeats <= npads - 1
+        # the padded length should include at leat the cls token, regardless of drop_zerocount or not
+        npads = nfeats + 1    
+    assert nfeats <= npads - 1
+
     # assign special token index: cls, mask, and pad token
     # 0~nfeats-1 are gene tokens, cls is nfeats, pad is nfeats+1
     cls_idx = nfeats
@@ -102,19 +106,26 @@ def cell_sentance_const(counts, npads = None):
     # fill in the cls_idx as the first of feat_sent
     feat_sent[:, 0] = cls_idx
 
-    for i in range(ncells):
-        # use counts_bin if want interger
-        expr_i = counts[i, :].toarray().squeeze()
-        feat_i = np.arange(nfeats)[expr_i != 0]
-        # NOTE: for cls and padding, assign expr_sentence value to be 0, fine with continuous embedding, 
-        # but be careful for bin nn.embedding 
-        expr_sent[i, 1:(1 + len(feat_i))] = expr_i[expr_i != 0]
-        # 1 + len(feat_i) <= 257, NOTE: slicing will include the last one (index 256) if len(feat_i) + 1 > 256
-        feat_sent[i, 1:(1 + len(feat_i))] = feat_i
+    if drop_zerocount:
+        for i in range(ncells):
+            # use counts_bin if want interger
+            expr_i = counts[i, :].toarray().squeeze()
+            feat_i = np.arange(nfeats)[expr_i != 0]
+            # NOTE: for cls and padding, assign expr_sentence value to be 0, fine with continuous embedding, 
+            # but be careful for bin nn.embedding 
+            expr_sent[i, 1:(1 + len(feat_i))] = expr_i[expr_i != 0]
+            # 1 + len(feat_i) <= 257, NOTE: slicing will include the last one (index 256) if len(feat_i) + 1 > 256
+            feat_sent[i, 1:(1 + len(feat_i))] = feat_i
+    
+    else:
+        # the same across all cells, as all genes are included
+        feat_sent[:, 1:(nfeats + 1)] = np.arange(nfeats)[None, :]
+        expr_sent[:, 1:(nfeats + 1)] = counts.toarray()
+
 
     return sp.csr_matrix(expr_sent), sp.csr_matrix(feat_sent)
 
-def tokenize_expr_para(counts_norm, nbins = None, npads = None, njobs = 16, nchunks = None):
+def tokenize_expr_para(counts_norm, dropzeros = True, nbins = None, npads = None, njobs = 16, nchunks = None):
     from multiprocessing import Pool
     if nchunks is None:
         nchunks = njobs
@@ -126,13 +137,14 @@ def tokenize_expr_para(counts_norm, nbins = None, npads = None, njobs = 16, nchu
         for chunk_i in range(len(counts_chunks)):
             args.append((counts_chunks[chunk_i], nbins))
 
+        # binning can be done during the training
         with Pool(processes = njobs) as pool:
             counts_bin = pool.starmap(expr_binning, args)
         counts_chunks = counts_bin
     
     args = []
     for chunk_i in range(len(counts_chunks)):
-        args.append((counts_chunks[chunk_i], npads))
+        args.append((counts_chunks[chunk_i], dropzeros, npads))
     
     with Pool(processes = njobs) as pool:
         res = pool.starmap(cell_sentance_const, args)

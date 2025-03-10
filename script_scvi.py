@@ -100,11 +100,53 @@ fig.savefig("results/scvi/embed_scIB_lung.png", bbox_inches = "tight")
 scores1 = eval.eval_batch_correction(adata = adata_embed1, embed_key = "X_scVI", label_key = "final_annotation", batch_key = "batch")
 scores1["dataset"] = "Immune_ALL"
 scores2 = eval.eval_batch_correction(adata = adata_embed2, embed_key = "X_scVI", label_key = "celltype", batch_key = "tech")
-scores2["dataset"] = "Pancrease"
+scores2["dataset"] = "Pancreas"
 scores3 = eval.eval_batch_correction(adata = adata_embed3, embed_key = "X_scVI", label_key = "cell_type", batch_key = "dataset")
 scores3["dataset"] = "Lung"
 
 scores = pd.concat([scores1, scores2, scores3], axis = 0, ignore_index = True)
 scores.to_csv("results/scvi/scores_scib.csv")
 
+
+# In[]
+# NOTE: one more baseline method: scGPT
+adata_embed1 = anndata.AnnData(X = np.load("/project/cedula3/code/scFoundation/scIB_test/Immune_ALL_human.npy"), obs = adata_test_meta1.obs)
+adata_embed2 = anndata.AnnData(X = np.load("/project/cedula3/code/scFoundation/scIB_test/human_pancreas_norm_complexBatch.npy"), obs = adata_test_meta2.obs)
+adata_embed3 = anndata.AnnData(X = np.load("/project/cedula3/code/scFoundation/scIB_test/Lung_atlas_public.npy"), obs = adata_test_meta3.obs)
+
+adata_embed1.obsm["X_scgpt"] = adata_embed1.X.copy()
+adata_embed2.obsm["X_scgpt"] = adata_embed2.X.copy()
+adata_embed3.obsm["X_scgpt"] = adata_embed3.X.copy()
+
+sc.pp.neighbors(adata_embed1, n_neighbors = 15)
+sc.tl.umap(adata_embed1, min_dist = 0.1)
+sc.pp.neighbors(adata_embed2, n_neighbors = 15)
+sc.tl.umap(adata_embed2, min_dist = 0.1)
+sc.pp.neighbors(adata_embed3, n_neighbors = 15)
+sc.tl.umap(adata_embed3, min_dist = 0.1)
+
+fig = utils.plot_embeds(embed = adata_embed1.obsm["X_umap"], annos = adata_embed1.obs[["final_annotation", "batch"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+fig.tight_layout()
+fig.savefig("results/scGPT/embed_scIB_immune_all.png", bbox_inches = "tight")
+# pancrease
+fig = utils.plot_embeds(embed = adata_embed2.obsm["X_umap"], annos = adata_embed2.obs[["celltype", "tech"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 3, alpha = 0.4, colormap = colormap, label_inplace = False)
+fig.tight_layout()
+fig.savefig("results/scGPT/embed_scIB_pancreas.png", bbox_inches = "tight")
+# lung atlas
+fig = utils.plot_embeds(embed = adata_embed3.obsm["X_umap"], annos = adata_embed3.obs[["cell_type", "batch"]].astype("category"), markerscale = 5, figsize = (20, 17), s = 3, alpha = 0.7, colormap = colormap, label_inplace = False)
+fig.tight_layout()
+fig.savefig("results/scGPT/embed_scIB_lung.png", bbox_inches = "tight")
+
+# In[]
+scores1 = eval.eval_batch_correction(adata = adata_embed1, embed_key = "X_scgpt", label_key = "final_annotation", batch_key = "batch")
+scores1["dataset"] = "Immune_ALL"
+scores2 = eval.eval_batch_correction(adata = adata_embed2, embed_key = "X_scgpt", label_key = "celltype", batch_key = "tech")
+scores2["dataset"] = "Pancreas"
+scores3 = eval.eval_batch_correction(adata = adata_embed3, embed_key = "X_scgpt", label_key = "cell_type", batch_key = "dataset")
+scores3["dataset"] = "Lung"
+
+scores = pd.concat([scores1, scores2, scores3], axis = 0, ignore_index = True)
+scores.to_csv("results/scGPT/scores_scib.csv")
+# %%
+# scores2 = pd.read_csv("/project/cedula3/code/scFoundation/scGPTmetrics.csv", index_col = 0)
 # %%

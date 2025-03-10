@@ -8,7 +8,7 @@ import scipy.sparse as sp
 import src.data_utils as data_utils
 import pandas as pd
 
-import sys
+import sys, os
 sys.path.append("src")
 
 from data_utils import set_seed
@@ -20,10 +20,20 @@ from data_utils import set_seed
 #
 # ----------------------------------------------------------------------------
 n_mgene = 256
-use_bin = True
-res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+# whether use the binary count or not
+COUNT_TYPE = "mean"
+DROP_ZEROS = False
+
+res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_{COUNT_TYPE}_{int(DROP_ZEROS)}")
+if not os.path.exists(res_dir):
+    os.makedirs(res_dir)
 
 gene_embed_dict = torch.load(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/gene_embed_meta{n_mgene}.pt", weights_only = False)
+
+meta_genes, meta_gene_sizes = np.unique(gene_embed_dict["labels"]["labels"].values, return_counts = True)
+meta_gene_sizes = meta_gene_sizes[np.argsort(meta_genes)]
+
+# In[]
 # original esm is half precision, need to modify to full precision for training
 token_embed = gene_embed_dict["meta_embed"].to(torch.float32)
 # add the cls, mask, and padding tokens
@@ -45,10 +55,14 @@ counts_norm = []
 for tissue in tissue_list:
     print(tissue)
     data_dir = Path(f"/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/{tissue}")
-    adata = anndata.read_h5ad(data_dir / f"adata_meta{n_mgene}_4000hvg.h5ad")
+    adata = anndata.read_h5ad(data_dir / f"adata_meta{n_mgene}.h5ad")
     # use bin data
-    if use_bin:
+    if COUNT_TYPE == "binary":
         adata.X = adata.layers["counts_bin"].copy()
+    elif COUNT_TYPE == "mean":
+        # average by meta-gene size
+        adata.X = sp.csr_matrix(adata.X.toarray()/meta_gene_sizes[None, :])
+
     sc.pp.normalize_total(adata, target_sum = 10e4, key_added = "libsize")
     sc.pp.log1p(adata)
 
@@ -95,7 +109,7 @@ for chunk, counts_norm in enumerate(counts_norm_list):
     ncells_chunk = counts_norm.shape[0]
     meta_dict["shape"][f"chunk_{chunk}"] = (ncells_chunk, n_mgene + 1)
     # NOTE: two versions: directly use the continuous expr values, or bin the expr values
-    expr_sent, feat_sent = data_utils.tokenize_expr_para(counts_norm, njobs = 16, nchunks = 16, npads = n_mgene + 1)
+    expr_sent, feat_sent = data_utils.tokenize_expr_para(counts_norm, dropzeros = DROP_ZEROS, nbins = None, njobs = 16, nchunks = 16, npads = n_mgene + 1)
 
     # copy from UCE, issue with memmap, only work with dense matrix
     fp = np.memmap(res_dir / f"expr_sent_{n_mgene}_{chunk}.npz", dtype='float32', mode='w+', shape=(ncells_chunk, n_mgene + 1))

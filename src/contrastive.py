@@ -24,7 +24,8 @@ def concat_all_gather(tensor):
                       for _ in range(dist.get_world_size())]
     dist.all_gather(tensors_gather, tensor, async_op=False)
 
-    output = torch.cat(tensors_gather, dim=0)
+    # output = torch.cat(tensors_gather, dim=0)
+    output = tensors_gather
     return output
 
 
@@ -34,6 +35,19 @@ def exact_equal(A, B):
 
 def full_equal(A, B):
     return (A @ B.T) != 0
+
+
+def find_ancestor(A, B):
+    """ including itself """
+    result = torch.sum(torch.logical_or(A[:, None, :], B[None, :, :]), dim = 2)
+    # result = torch.sum((A[:, None, :] + B[None, :, :]) > 0, dim = 2)
+    return result <= torch.sum(A, dim = 1, keepdim = True)
+
+def find_descend(A, B):
+    """ including itself """
+    result = A @ B.T 
+    return result == torch.sum(A, dim = 1, keepdim = True)
+
 
 class MultiPosConLoss(nn.Module):
     """
@@ -50,19 +64,17 @@ class MultiPosConLoss(nn.Module):
     def set_temperature(self, temp=0.1):
         self.temperature = temp
 
-    def forward(self, features, labels, batchs = None):
+    def forward(self, features, labels, batchs = None, mask_samples = None):
         device = features.device
         # normalize the features
         features = nn.functional.normalize(features, dim=-1, p=2)
 
         # ground truth
         if self.use_bincode_label:
-             # NOTE: bincode label, use the binary vector
-            mask = exact_equal(labels, labels).float().to(device)
-            # full mask, bin_code label have common ancestor, larger number of positives
-            full_mask = full_equal(labels, labels).float().to(device)
-            # neutral mask: full mask except for the exact mask
-            neutral_mask = full_mask - mask
+            # for every label bincode, only when the neighboring label bincode have the same 1 position (and more) have inner product == label.sum
+            # these neighbors are either same type (exactly same) or descendent (same and more), these are positive 
+            mask = find_descend(labels, labels).float().to(device)
+            neutral_mask = (find_ancestor(labels, labels).float() - exact_equal(labels, labels).float()).to(device)
         else:
             # NOTE: the integer label, exactly the same
             labels = labels.contiguous().view(-1, 1)
@@ -122,30 +134,36 @@ class MultiPosConLossMultiGPUs(nn.Module):
     def set_temperature(self, temp=0.1):
         self.temperature = temp
 
-    def forward(self, features, labels, batchs = None):
+    def forward(self, features, labels, batchs = None, mask_samples = None):
 
         device = features.device
         feats = nn.functional.normalize(features, dim=-1, p=2)
         local_batch_size = feats.size(0)
 
+        # get all masked samples
+        # all_mask_samples = torch.cat(concat_all_gather(mask_samples), dim = 0)
         # concatenate all features across devices (for multi-gpus training)
-        all_feats = concat_all_gather(feats)
+        all_feats = torch.cat(concat_all_gather(feats), dim = 0)
         # concatenate all labels across devices (for multi-gpus training)
-        all_labels = concat_all_gather(labels)  
+        all_labels = concat_all_gather(labels) 
 
         # compute the mask based on labels
         # labels by all_labels mask, 1 for the same label, 0 for different label
 
         if self.use_bincode_label:
             # NOTE: bincode label, use the binary vector
-            mask = exact_equal(labels, all_labels).float().to(device)
-            # full mask, bin_code label have common ancestor, larger number of positives
-            full_mask = full_equal(labels, all_labels).float().to(device)
-            # neutral mask: full mask except for the exact mask
-            neutral_mask = full_mask - mask
+            # mask = exact_equal(labels, all_labels).float()
+            mask = []
+            neutral_mask = []
+            # save gpu memory
+            for labels_i in all_labels:
+                mask.append(find_descend(labels, labels_i).float())
+                neutral_mask.append((find_ancestor(labels, labels_i).float() - exact_equal(labels, labels_i).float()))
+            mask = torch.cat(mask, dim = 1)
+            neutral_mask = torch.cat(neutral_mask, dim = 1)
         else:
             # NOTE: the integer label, exactly the same
-            mask = torch.eq(labels.view(-1, 1), all_labels.contiguous().view(1, -1)).float().to(device)
+            mask = torch.eq(labels.view(-1, 1), all_labels.contiguous().view(1, -1)).float()
             full_mask = None
             neutral_mask = None
 
@@ -181,7 +199,10 @@ class MultiPosConLossMultiGPUs(nn.Module):
         # 2. neutral mask
         if neutral_mask is not None:
             logits = logits - neutral_mask * 1e9
-
+        
+        # Now remove the unknown
+        logits = logits[~mask_samples, :]#[:, ~all_mask_samples]
+        mask = mask[~mask_samples, :]#[:, ~all_mask_samples]
         # compute ground-truth distribution
         p = mask / mask.sum(1, keepdim=True).clamp(min=1.0)
 

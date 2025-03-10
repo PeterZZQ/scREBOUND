@@ -3,18 +3,16 @@ import torch
 from torch import nn as nn
 import torch.nn.functional as F
 import collections
-import math
-from typing import Literal
-
+from torch.amp import autocast
     
 def identity(x):
     return x
 
-def one_hot(index: torch.Tensor, n_cat: int) -> torch.Tensor:
+def one_hot(index, n_cat, dtype = torch.bfloat16) -> torch.Tensor:
     """One hot a tensor of categories."""
     onehot = torch.zeros(index.size(0), n_cat, device=index.device)
     onehot.scatter_(1, index.type(torch.long), 1)
-    return onehot.type(torch.float32)
+    return onehot.type(dtype)
 
 
 class FCLayers(nn.Module):
@@ -65,6 +63,7 @@ class FCLayers(nn.Module):
         bias: bool = True,
         inject_covariates: bool = False,
         activation_fn: nn.Module = nn.GELU,
+        dtype: torch.dtype = torch.float32
     ):
         super().__init__()
         self.inject_covariates = inject_covariates
@@ -109,6 +108,8 @@ class FCLayers(nn.Module):
                 ]
             )
         )
+
+        self.dtype = dtype
 
     def inject_into_layer(self, layer_num) -> bool:
         """Helper to determine if covariates should be injected."""
@@ -171,7 +172,7 @@ class FCLayers(nn.Module):
                 raise ValueError("cat not provided while n_cat != 0 in init. params.")
             if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
                 if cat.size(1) != n_cat:
-                    one_hot_cat = one_hot(cat, n_cat)
+                    one_hot_cat = one_hot(cat, n_cat, dtype = self.dtype)
                 else:
                     one_hot_cat = cat  # cat has already been one_hot encoded
                 one_hot_cat_list += [one_hot_cat]
@@ -213,6 +214,7 @@ class decoder(nn.Module):
         inject_covariates: bool = False,
         use_batch_norm: bool = False,
         use_layer_norm: bool = True,
+        dtype: torch.dtype = torch.float32
     ):
         super().__init__()
         self.fc = FCLayers(
@@ -228,6 +230,7 @@ class decoder(nn.Module):
             use_activation=True,
             bias=True,
             activation_fn=nn.GELU,
+            dtype = dtype
         )
         self.linear_out = nn.Linear(n_hidden, n_output)
         # NOTE: the expression value is non-negative, but doesn't normalize by 1
@@ -240,4 +243,104 @@ class decoder(nn.Module):
         # y = self.output_act(self.linear_out(x))
         y = self.linear_out(x)
         return y
- 
+
+
+class TransformerLayer(nn.Module):
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, activation: str = "relu"):
+        super(TransformerLayer, self).__init__()
+        
+        # Multi-head self attention
+        self.self_attn = nn.MultiheadAttention(embed_dim = d_model, num_heads = nhead, dropout = dropout)
+        
+        # Feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
+        self.dropout = nn.Dropout(dropout)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
+        
+        # Layer Normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+        
+        # Dropout layers
+        self.dropout1 = nn.Dropout(dropout)
+        self.dropout2 = nn.Dropout(dropout)
+        
+        # Activation function
+        if activation == "relu":
+            self.activation = F.relu
+        elif activation == "gelu":
+            self.activation = F.gelu
+        else:
+            raise ValueError("activation can only be `relu' or `gelu'")
+
+
+    def forward(self, x, src_key_padding_mask = None):
+        # Apply mixed precision to the entire TransformerEncoderLayer
+        attn_output = self.self_attn(x, x, x, key_padding_mask=src_key_padding_mask)[0]
+        
+        # Force layer normalization and softmax to run in FP32 for stability
+        with autocast(device_type = "cuda", enabled=False):
+            x = self.norm1(x + self.dropout1(attn_output))
+        
+        # Continue the feedforward part in mixed precision
+        feedforward_output = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        
+        # Again, force normalization to run in FP32
+        with autocast(device_type = "cuda", enabled=False):
+            x = self.norm2(x + self.dropout2(feedforward_output))
+        
+        return x
+    
+
+class TransformerBlocks(nn.Module):
+    def __init__(self, d_model: int, n_head: int, num_layers: int, dim_feedforward: int, dropout: float, activation: str = "gelu"):
+        super(TransformerBlocks, self).__init__()
+        self.layers = nn.ModuleList([TransformerLayer(d_model, n_head, dim_feedforward, dropout, activation) for _ in range(num_layers)])
+    
+    def forward(self, src, src_key_padding_mask = None):
+        for layer in self.layers:
+            src = layer(src, src_key_padding_mask)
+        return src 
+
+
+# class CustomTransformerEncoderLayer(nn.Module):
+#     def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, dtype: torch.dtype = torch.float32):
+#         super(CustomTransformerEncoderLayer, self).__init__()
+#         self.layer = nn.TransformerEncoderLayer(d_model=d_model, 
+#                                                 nhead=nhead, 
+#                                                 dim_feedforward=dim_feedforward, 
+#                                                 dropout=dropout)
+
+#         self.dtype = dtype
+#         if self.dtype != torch.float32:
+#             print(f"cast the model to {self.dtype}")
+        
+
+#     def forward(self, x, src_key_padding_mask = None):
+#         # Apply mixed precision to the entire TransformerEncoderLayer
+#         attn_output = self.layer.self_attn(x, x, x, key_padding_mask=src_key_padding_mask)[0]
+        
+#         # Force layer normalization and softmax to run in FP32 for stability
+#         with autocast(device_type = "cuda", enabled=False):
+#             x = self.layer.norm1(attn_output + x)
+        
+#         # Continue the feedforward part in mixed precision
+#         feedforward_output = self.layer.linear2(self.layer.dropout(self.layer.activation(self.layer.linear1(x))))
+        
+#         # Again, force normalization to run in FP32
+#         with autocast(device_type = "cuda", enabled=False):
+#             x = self.layer.norm2(feedforward_output + x)
+        
+#         return x
+
+
+
+# class CustomTransformer(nn.Module):
+#     def __init__(self, d_model, n_head, num_layers, dim_feedforward=2048, dropout=0.1, dtype=torch.float32):
+#         super(CustomTransformer, self).__init__()
+#         self.layers = nn.ModuleList([CustomTransformerEncoderLayer(d_model, n_head, dim_feedforward, dropout, dtype) for _ in range(num_layers)])
+    
+#     def forward(self, src, src_key_padding_mask = None):
+#         for layer in self.layers:
+#             src = layer(src, src_key_padding_mask)
+#         return src

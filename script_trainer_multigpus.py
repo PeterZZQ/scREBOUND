@@ -14,21 +14,21 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.distributed import init_process_group, destroy_process_group
 from torch.utils import data
 from transformers import AdamW, get_linear_schedule_with_warmup
-
+from torch.optim.lr_scheduler import OneCycleLR
 
 sys.path.append("./src")
 
 import data_utils
 from transformer_model import TransformerModel, get_default_config
-import trainer
+import trainer as trainer
 
 # TODO: update to wandb
 from torch.utils.tensorboard import SummaryWriter
 
+
 def initialize_services(log_dir):
     writer = SummaryWriter(log_dir=log_dir)
     return writer
-
 
 # In[]
 def main():
@@ -37,23 +37,17 @@ def main():
     # Define the device
     assert torch.cuda.is_available(), "Training on CPU is not supported"
     device = torch.device("cuda")
-    print(f"GPU {global_rank} - Using device: {device}")
+    print(f"GPU {local_rank} - Using device: {device}")
     # Load the dataset
-    print(f"GPU {global_rank} - Loading dataset...")
+    print(f"GPU {local_rank} - Loading dataset...")
 
     n_mgene = 256
-    # NOTE: save in localscratch for faster memory access
-    # no hvgs
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
-    # top 4000 hvgs
-    # data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_4000hvg")
-    # load the token embedding
-    token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False)
-
     model_config = get_default_config()
     batch_size = 512
-    # classifier for 4 gpus, 0.5e-5 too large for less than 4 
-    lr = 0.3e-5 * (batch_size/32)
+    # classifier for 4 gpus, 0.5e-5 too large for less than 4, slightly larger for bp16
+    lr = 0.5e-5 * (batch_size/32)
+
+    PRECISION = torch.float16
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -64,22 +58,30 @@ def main():
                                   "d_hidden": 2048, 
                                   "n_layer": 6,
                                   "d_output": 64,
-                                  "dropout": 0.05, # important for hyper-parameter tuning
+                                  "dropout": 0.1, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
                                   "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
                                   "lamb_kd": 0.0,
-                                  "lamb_sup": 10, # contrastive loss multigpus with sup >= 10 cause strong instability
-                                  "sup_type": "contrastive",
+                                  "lamb_sup": 0.0,
+                                  "sup_type": None,
                                   "mlm_include_zero": False,
+                                  "count_mode": "continuous",
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
+                                  "use_fastatten": False,
                                   "pretrain_path": None,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint/",
-                                  "checkpoint_prefix": "checkpoint_6_512_contr10"
+                                  "precision": PRECISION,
+                                  "checkpoint_path":"/project/zzhang834/LLM_KD/checkpoint_bf16/",
+                                  "checkpoint_prefix": "checkpoint_6_512",
                                   })
     
     # construct dataset
+    # NOTE: save in localscratch for faster memory access
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+    # load the token embedding
+    token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False).to(model_config.precision)
+
     # load the cell meta-info
     meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = False)
     # total number of batches is 604, maximum batch size is 2million, minimum batch size is 843
@@ -92,8 +94,6 @@ def main():
         scdataset = data_utils.sc_dataset_chunk(expr_path = data_dir / f"expr_sent_{n_mgene}.npz", gene_path = data_dir / f"feat_sent_{n_mgene}.npz",
                                                 ncells = meta_dict["shape"]["full"][0], npads = meta_dict["shape"]["full"][1], labels = meta_dict["label"],
                                                 batches = meta_dict["batch"], batch_size = model_config.batch_size)
-
-
 
     # train test split
     train_size = int(0.98 * len(scdataset))
@@ -112,32 +112,32 @@ def main():
     test_loader = data.DataLoader(test_dataset, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8)
 
     # update the warm-up steps to be 10% of total steps, make suret that model_config is consistent with fm_model configuration
-    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.2)})
-    print(f"GPU {global_rank} - Done.")
+    model_config.__dict__.update({"n_warmup_stp_lr": int(len(train_loader) * model_config.n_epoch * 0.1)})
+    print(f"GPU {local_rank} - Done.")
 
     # model hyper-parameters
-    fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
-    
+    fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device).to(model_config.precision)
+
     # update the model parameters
-    fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = torch.float32) #.to(device) label_bincode is moved to device in infer_databatch
+    fm_model.label_bincode = torch.tensor(meta_dict["label_bincode"], dtype = model_config.precision) #.to(device) label_bincode is moved to device in infer_databatch
     # NOTE: for the unknown labels, include the label mask, there are totally 898,317 cells with unknown labels (1.4% of total cell population)
     # the 677th dimension
-    fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = torch.float32).to(device)
-
+    fm_model.label_mask = torch.tensor(meta_dict["label_bincode"][meta_dict["label_code"] == "unknown--unknown"].squeeze(), dtype = model_config.precision).to(device)
 
     # wrap model into multi-gpus setting
     fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
-    # init optimizer and scheduler, learning rate scale with the batch_size
-    optimizer = AdamW(fm_model.parameters(), lr = model_config.lr)
+    # init optimizer and scheduler, learning rate scale with the batch_size, larger eps for more stability in bf16
+    optimizer = AdamW(fm_model.parameters(), lr = model_config.lr, eps = 1e-6)
 
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = model_config.n_warmup_stp_lr, num_training_steps = model_config.n_epoch * len(train_loader))
+    # scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps = model_config.n_warmup_stp_lr, num_training_steps = model_config.n_epoch * len(train_loader))
+    scheduler = OneCycleLR(optimizer, max_lr = model_config.lr, steps_per_epoch = len(train_loader), epochs = model_config.n_epoch, pct_start = 0.3)
 
     if global_rank == 0:
         print(f"Linear scheduler with warmup, warmup steps: {model_config.n_warmup_stp_lr}, total steps: {model_config.n_epoch * len(train_loader)}, orig lr: {lr:.2e}")
 
     # Load latest checkpoint
     if model_config.pretrain_path is not None: 
-        print(f"GPU {global_rank} - Preloading lastest model'")
+        print(f"GPU {local_rank} - Preloading lastest model'")
         # load parameter from last train
         state = torch.load(model_config.pretrain_path, weights_only = False)
         # Get the common keys between the current model and the saved model
@@ -155,8 +155,7 @@ def main():
         initial_epoch = 0
         initial_step = 0
         # If we couldn't find a model to preload, just start from scratch
-        print(f'GPU {global_rank} - Could not find model to preload. Starting from scratch')
-
+        print(f'GPU {local_rank} - Could not find model to preload. Starting from scratch')
 
     # Init logger process, only main thread
     if global_rank == 0:
@@ -178,10 +177,9 @@ if __name__ == '__main__':
     num_gpus = torch.cuda.device_count()
     print(f"Number of available GPUs: {num_gpus}")
     # environment variables generated when use torchrun
-    # same for single-node case:
-    # local gpu id within the machine/node
+    # local gpu id within the machine
     local_rank = int(os.environ['LOCAL_RANK'])
-    # global gpu id across machines (uniq), same as local with one machine/node, for printing (only on one gpu)
+    # global gpu id across machines (uniq), same as local with one machine
     global_rank = int(os.environ['RANK'])
     print(f"local rank: {local_rank}")
     print(f"global rank: {global_rank}")

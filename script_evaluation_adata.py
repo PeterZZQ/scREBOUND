@@ -25,13 +25,15 @@ from torch.utils import data
 sys.path.append("./src")
 
 import data_utils
-from transformer_model import TransformerModel, get_default_config
-import trainer
+from transformer_model import TransformerModel, get_default_config, TransformerModelDigitize
+import trainer_mixprec
 import utils
 import eval
 
 import warnings
 warnings.filterwarnings("ignore")
+
+import scipy.sparse as sparse
 
 
 def evaluation(model, dataloader):
@@ -144,6 +146,7 @@ adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_
 
 # take out the pancreas dataset
 adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
+adata_pancreas.layers["counts"] = adata_pancreas.X.copy()
 sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
 sc.pp.log1p(adata_pancreas)
 adata_test_meta4 = adata_pancreas
@@ -194,7 +197,8 @@ adata_test_meta4.obs.loc[adata_test_meta4.obs["cell_type"] == "epithelial cell o
 
 # In[]
 # function
-data_utils.set_seed(3)
+
+data_utils.set_seed(1)
 
 # Define the device
 device = torch.device("cuda:1")
@@ -213,30 +217,37 @@ meta_dict = torch.load(data_dir / f"meta_{n_mgene}_bincode.pt", weights_only = F
 # ------------------------------Update for the model selected---------------------------------------------------
 # NOTE: 1. vanilla model with only mlm loss
 # vanilla mlm model
-model_name = "checkpoint_8_512_1"
+# model_name = "checkpoint_8_512_1"
 # pretrained classification model
 # model_name = "checkpoint_6_512_classi100_1"
 # model_name = "checkpoint_6_512_classiunweight100_1"
-model_dir = f"/project/zzhang834/LLM_KD/checkpoint_fastatten/{model_name}.pth"
-res_dir = f"results_fastatten/{model_name}/"
+# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_fastatten/{model_name}.pth"
+# res_dir = f"results_fastatten/{model_name}/"
 
-# # fine-tuned model
-# model_name = "checkpoint_6_512_classiunweight100_disc10_1"
-# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_disc/{model_name}.pth"
-# res_dir = f"results/finetune_disc/{model_name}/"
+# fine-tuned model
+model_name = "checkpoint_6_512_contr1_disc10_1"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_disc/{model_name}.pth"
+res_dir = f"results/finetune_disc/{model_name}/"
 
 # model_name = "checkpoint_6_512_contr0_1"
-# model_name = "checkpoint_6_512_contr10_1"
+model_name = "checkpoint_6_512_contr10_1"
 # model_name = "checkpoint_6_512_contrcb10_1"
-# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_contr/{model_name}.pth"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_contr/{model_name}.pth"
+res_dir = f"results/finetune_contr/{model_name}/"
 
-# res_dir = f"results/finetune_contr/{model_name}/"
+# bf16 model
+model_name = "checkpoint_6_512_0_9999"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_mixprec/{model_name}.pth"
+res_dir = f"results_fastatten/{model_name}/"
+
+
 
 state = torch.load(model_dir, weights_only = False)
-model_config = state["model_config"]
-# model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir, "use_discriminator": False, "lamb_disc": 0.0})
-
-model_config.__dict__.update({"checkpoint_path": None, "checkpoint_prefix": None, "pretrain_path":  model_dir})
+model_config = get_default_config()
+model_config.__dict__.update(state["model_config"].__dict__)
+for x, val in model_config.__dict__.items():
+    print(x, end = ": ")
+    print(val)
 # ------------------------------------------------------------------------------------------------------------------
 
 
@@ -254,7 +265,8 @@ test_loader4 = data.DataLoader(test_dataset4, batch_size = 1, shuffle = False, p
 
 print(f"GPU - Done.")
 
-fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
+# fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
+fm_model = TransformerModelDigitize(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
 
 print(f"GPU - Preloading lastest model'")
 # Get the common keys between the current model and the saved model
@@ -271,6 +283,62 @@ print(f"GPU - Done.")
 # Visualize the embedding and measure the batch effect removal
 #
 # ------------------------------------------------------------------------------------------------------------------------
+import trainer_mixprec
+import trainer
+
+
+def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
+    """
+    Description:
+    ------------
+        Obtain the model cell embedding for data in dataloader
+    
+    Parameters:
+    ------------
+        model: the transformer model
+        dataloader: the dataloader for the input data
+        mask_prob: the masking probability of data in the forward pass, default is 0
+
+    """
+    # NOTE: no token masking for cell embedding extraction
+    if multi_gpus:
+        model_acc = model.module
+    else:
+        model_acc = model
+
+    PRECISION = torch.bfloat16
+    model_acc.model_config.mask_prob = mask_prob
+
+    cell_embeds = []
+    labels = []
+    batchs = []
+    with torch.no_grad():
+        for data_sample in tqdm.tqdm(dataloader, desc=f"Calc embed"):
+            expr_sample = data_sample["expr"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
+            gene_sample = data_sample["gene"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
+            # Forward pass
+            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
+            cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
+
+            if "label" in data_sample.keys():
+                labels.append(data_sample["label"].squeeze(0).detach().cpu().numpy())
+            else:
+                labels.append(np.array([np.nan] * cell_embed.shape[0]))
+
+            if "batch" in data_sample.keys():
+                batchs.append(data_sample["batch"].squeeze(0).detach().cpu().numpy())
+            else:
+                batchs.append(np.array([np.nan] * cell_embed.shape[0]))
+
+    cell_embeds = sparse.vstack(cell_embeds)
+    labels = np.concatenate(labels, axis = 0)
+    batchs = np.concatenate(batchs, axis = 0)
+    meta = pd.DataFrame.from_dict({"labels": labels, "batchs": batchs})
+    adata = anndata.AnnData(X = cell_embeds, obs = meta.astype("category"))
+
+    return adata
+
+# In[]
 # NOTE: calculate the embedding
 # TODO: issue, for the classifier, should the masked input be used??
 adata_embed1 = trainer.cell_embed(model = fm_model, dataloader = test_loader1, multi_gpus = False)
@@ -304,6 +372,7 @@ sc.tl.umap(adata_embed4, min_dist = 0.3)
 
 
 # In[]
+
 # Visualize the latent embedding
 if not os.path.exists(res_dir):
     os.makedirs(res_dir)
@@ -333,10 +402,11 @@ scores2 = eval.eval_batch_correction(adata = adata_embed2, embed_key = "latent",
 scores2["dataset"] = "Pancreas"
 scores3 = eval.eval_batch_correction(adata = adata_embed3, embed_key = "latent", label_key = "cell_type", batch_key = "dataset")
 scores3["dataset"] = "Lung"
-scores4 = eval.eval_batch_correction(adata = adata_embed4, embed_key = "latent", label_key = "cell_type", batch_key = "dataset_id")
-scores4["dataset"] = "Pancreas-training"
+# evaluation takes too long
+# scores4 = eval.eval_batch_correction(adata = adata_embed4, embed_key = "latent", label_key = "cell_type", batch_key = "dataset_id")
+# scores4["dataset"] = "Pancreas-training"
 
-scores = pd.concat([scores1, scores2, scores3, scores4], axis = 0, ignore_index = True)
+scores = pd.concat([scores1, scores2, scores3], axis = 0, ignore_index = True)
 scores.to_csv(res_dir + "scores_scib.csv")
 
 # if fm_model.model_config.sup_type is None:
@@ -611,6 +681,87 @@ fig.savefig("results/test_pancreas_4000hvg_stats.png", bbox_inches = "tight")
 # fig = utils.plot_embeds(embed = adata_test2.obsm["latent_umap"], annos = adata_test.obs[["cell_type (coarse)"]].astype("category"), markerscale = 15, figsize = (25, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = True)
 # fig.tight_layout()
 # # fig.savefig(res_dir + "")
+
+
+# In[]
+adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
+adata_pancreas.layers["counts"] = adata_pancreas.X.copy()
+sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
+sc.pp.log1p(adata_pancreas)
+
+# check the distribution of counts
+counts = adata_pancreas.layers["counts"][::10,:].toarray()
+lib = counts.sum(axis = 1).squeeze()
+counts_val = adata_pancreas.layers["counts"][::1000,:].toarray().reshape(-1)
+
+fig = plt.figure(figsize = (20, 7))
+ax = fig.subplots(nrows = 1, ncols = 2)
+# check library distribution
+ax[0].hist(lib, bins = 30)
+ax[0].set_yscale("log")
+# check count distribution
+ax[1].hist(counts_val, bins = 30)
+ax[1].set_yscale("log")
+fig.suptitle("stats")
+
+counts = adata_pancreas.X[::10,:].toarray()
+lib = counts.sum(axis = 1).squeeze()
+counts_val = adata_pancreas.X[::1000,:].toarray().reshape(-1)
+
+fig = plt.figure(figsize = (20, 7))
+ax = fig.subplots(nrows = 1, ncols = 2)
+# check library distribution
+ax[0].hist(lib, bins = 30)
+ax[0].set_yscale("log")
+# check count distribution
+ax[1].hist(counts_val, bins = 30)
+ax[1].set_yscale("log")
+fig.suptitle("normalized stats")
+
+
+# In[]
+
+# use mean instead
+adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
+adata_pancreas.layers["counts"] = adata_pancreas.X.copy()
+token_embed = torch.load("/project/zzhang834/LLM_KD/dataset/cellxgene/token_embed_256.pt", weights_only = False)
+
+meta_id, meta_counts = np.unique(feature_info["labels"].values, return_counts = True)
+counts = adata_pancreas.layers["counts"].toarray()
+counts[:, meta_id] = counts[:, meta_id]/meta_counts[None, :]
+adata_pancreas.layers["counts"] = counts.copy()
+adata_pancreas.X = counts.copy()
+sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
+sc.pp.log1p(adata_pancreas)
+
+# check the distribution of counts
+counts = adata_pancreas.layers["counts"][::10,:]
+lib = counts.sum(axis = 1).squeeze()
+counts_val = adata_pancreas.layers["counts"][::1000,:].reshape(-1)
+
+fig = plt.figure(figsize = (20, 7))
+ax = fig.subplots(nrows = 1, ncols = 2)
+# check library distribution
+ax[0].hist(lib, bins = 30)
+ax[0].set_yscale("log")
+# check count distribution
+ax[1].hist(counts_val, bins = 30)
+ax[1].set_yscale("log")
+fig.suptitle("stats")
+
+counts = adata_pancreas.X[::10,:]
+lib = counts.sum(axis = 1).squeeze()
+counts_val = adata_pancreas.X[::1000,:].reshape(-1)
+
+fig = plt.figure(figsize = (20, 7))
+ax = fig.subplots(nrows = 1, ncols = 2)
+# check library distribution
+ax[0].hist(lib, bins = 30)
+ax[0].set_yscale("log")
+# check count distribution
+ax[1].hist(counts_val, bins = 30)
+ax[1].set_yscale("log")
+fig.suptitle("normalized stats")
 
 
 # %%

@@ -14,6 +14,12 @@ import tqdm
 from torch.nn.utils import clip_grad_norm_
 import torch.distributed as dist
 
+# for bf16 training
+from torch.amp import autocast, GradScaler
+
+CAST_DTYPE = torch.bfloat16
+
+
 def infer_databatch(model, data_sample, multigpus: bool = True):
         """
         Description:
@@ -34,11 +40,10 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
              model_acc = model.module
         else:
              model_acc = model
-        PRECISION = model_acc.model_config.precision
-
-        expr_sample = data_sample["expr"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
-        gene_sample = data_sample["gene"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
-
+        # scale the expression feature to be between 0~1
+        expr_sample = data_sample["expr"].squeeze(0).to(model_acc.device, non_blocking = True)
+        gene_sample = data_sample["gene"].squeeze(0).to(model_acc.device, non_blocking = True)
+        
         with torch.no_grad():
             # binning the data
             if model_acc.model_config.count_mode == "digitize":
@@ -49,13 +54,14 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
                 # normalize the expression value range between 0 and 1
                 expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
 
+
         if "label" in data_sample.keys():
-            label_sample = data_sample["label"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
+            label_sample = data_sample["label"].squeeze(0).to(model_acc.device, non_blocking = True)
         else:
             label_sample = None
 
         if "batch" in data_sample.keys():
-            batch_sample = data_sample["batch"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
+            batch_sample = data_sample["batch"].squeeze(0).to(model_acc.device, non_blocking = True)
         else:
             batch_sample = None
         
@@ -110,7 +116,7 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
 
         
         else:
-            loss_sup = torch.tensor([0.0], device = model_acc.device).to(PRECISION)
+            loss_sup = torch.tensor([0.0], device = model_acc.device)
 
         
         # NOTE: try discriminator here, has to be bincode classifier
@@ -125,7 +131,7 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
             # ce expect int64 labels
             loss_batch = ce(batch_pred, batch_sample.long())
         else:
-            loss_batch  = torch.tensor([0.0], device = model_acc.device).to(PRECISION)
+            loss_batch  = torch.tensor([0.0], device = model_acc.device)
 
 
         # 3. KD loss from teacher model
@@ -155,31 +161,39 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
     else:
         model_acc = model
 
-    PRECISION = model_acc.model_config.precision
     model_acc.model_config.mask_prob = mask_prob
+
+    if model_acc.model_config.use_fastatten:
+        # because flashattention only accept 16bit model
+        enable_casting = True
+    else:
+        enable_casting = False
 
     cell_embeds = []
     labels = []
     batchs = []
     with torch.no_grad():
         for data_sample in tqdm.tqdm(dataloader, desc=f"Calc embed"):
-            expr_sample = data_sample["expr"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
-            gene_sample = data_sample["gene"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
 
-            # binning the data
-            with torch.no_grad():
+            with autocast(device_type="cuda", dtype = CAST_DTYPE, enabled = enable_casting):
+                expr_sample = data_sample["expr"].squeeze(0).to(model_acc.device, non_blocking = True)
+                gene_sample = data_sample["gene"].squeeze(0).to(model_acc.device, non_blocking = True)
+
                 # binning the data
-                if model_acc.model_config.count_mode == "digitize":
-                    expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
-                    bins_array = torch.arange(0, 1, 1/model_acc.n_bins).to(model_acc.device, non_blocking = True)
-                    expr_sample = torch.bucketize(expr_sample, bins_array)
-                else:
-                    # normalize the expression value range between 0 and 1
-                    expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
-                    
-            # Forward pass
-            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
-            cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
+                with torch.no_grad():
+                    # binning the data
+                    if model_acc.model_config.count_mode == "digitize":
+                        expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
+                        bins_array = torch.arange(0, 1, 1/model_acc.n_bins).to(model_acc.device, non_blocking = True)
+                        expr_sample = torch.bucketize(expr_sample, bins_array)
+                    else:
+                        # normalize the expression value range between 0 and 1
+                        expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
+
+                # Forward pass
+                _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
+            
+            cell_embeds.append(sparse.csr_matrix(cell_embed.to(torch.float32).detach().cpu().numpy()))  
 
             if "label" in data_sample.keys():
                 labels.append(data_sample["label"].squeeze(0).detach().cpu().numpy())
@@ -215,6 +229,7 @@ def save_checkpoint(epoch, step, model, optimizer, scheduler, loss, path):
     print(f"Checkpoint saved at epoch {epoch}.")
 
 
+
 def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, scheduler, writer, initial_epoch, initial_step, log_step):
     """
     Description:
@@ -231,6 +246,8 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
         writer: the tensorboard writer
         TODO: ADD
     """
+    scaler = GradScaler()
+
     # NOTE: dynamic masking probability, small to large
     if model.module.model_config.dynamic_maskprob:
         mask_prob_init = 0.2
@@ -248,6 +265,11 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
 
     # NOTE: training loop
     checkpoint_counter = 0
+    if model.module.model_config.use_fastatten:
+        torch.backends.cuda.enable_flash_sdp(True)
+        torch.backends.cuda.enable_mem_efficient_sdp(True)
+        torch.backends.cuda.enable_math_sdp(True)
+        
     for epoch in range(initial_epoch, model.module.model_config.n_epoch):
         torch.cuda.empty_cache()
         # Disable tqdm on all nodes except the rank 0 GPU on each server
@@ -261,18 +283,22 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
 
         for step, data_sample in enumerate(batch_iterator):
             model.module.train()
+            optimizer.zero_grad()
+            
             if step < initial_step:
                 continue
 
-            # NOTE: need to process the label into bincode
-            if model.module.model_config.sup_type is not None:
-                data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
+            with autocast(device_type="cuda", dtype = CAST_DTYPE):
+                # NOTE: need to process the label into bincode
+                if model.module.model_config.sup_type is not None:
+                    data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
 
-            loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)
+                loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)
 
-            optimizer.zero_grad()
-            loss.backward()
+            scaler.scale(loss).backward()
 
+            #Unscale the optimizer to clip gradients
+            scaler.unscale_(optimizer)
             # clip gradient
             max_grad_norm = 1.0 
             clip_grad_norm_(model.module.parameters(), max_grad_norm)
@@ -282,8 +308,10 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
             #     if param.grad is not None:
             #         if (param.grad.abs() < 1e-7).all():  
             #             print(f"Possible underflow in {name}")
+            #             assert False
 
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
 
             # NOTE: log the results
@@ -340,15 +368,16 @@ def train_multigpus(model, global_rank, train_loader, val_loader, optimizer, sch
                         val_loss_sup = 0.0
                         val_loss_kd = 0.0
                         for data_sample in val_loader:
-                            # NOTE: need to process the label into bincode
-                            if model.module.model_config.sup_type is not None:
-                                data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
+                            with autocast(device_type="cuda", dtype = CAST_DTYPE):
+                                # NOTE: need to process the label into bincode
+                                if model.module.model_config.sup_type is not None:
+                                    data_sample["label"] = model.module.label_bincode[data_sample["label"],:]
 
-                            loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)                            
-                            val_loss += loss.item()
-                            val_loss_mlm += loss_mlm.item()
-                            val_loss_sup += loss_sup.item()
-                            val_loss_kd += loss_kd.item()
+                                loss, loss_mlm, loss_sup, loss_kd = infer_databatch(model, data_sample, multigpus = True)                            
+                                val_loss += loss.item()
+                                val_loss_mlm += loss_mlm.item()
+                                val_loss_sup += loss_sup.item()
+                                val_loss_kd += loss_kd.item()
 
                         # log the values
                         val_loss /= len(val_loader)
