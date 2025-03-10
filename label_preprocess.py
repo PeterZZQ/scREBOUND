@@ -87,7 +87,7 @@ def get_ancestors(ont, cl_id, remove_self = True):
 n_mgene = 256
 # read in the label of dataset
 # data_dir = "/localscratch/ziqi/localscratch_tempdata/cellxgene/"
-data_dir = "/project/zzhang834/LLM_KD/dataset/cellxgene/"
+data_dir = "/project/zzhang834/LLM_KD/dataset/cellxgene_mean_1/"
 
 # meta_dict = torch.load(data_dir + f"meta_{n_mgene}_pancreas.pt", weights_only = False)
 meta_dict = torch.load(data_dir + f"meta_{n_mgene}.pt", weights_only = False)

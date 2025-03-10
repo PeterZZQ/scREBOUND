@@ -76,7 +76,7 @@ def main():
                                   "checkpoint_prefix": "checkpoint_6_512",
                                   })
 
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_mean_1")
     # load the token embedding
     token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False).to(model_config.precision)
 

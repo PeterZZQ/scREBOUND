@@ -22,7 +22,7 @@ from data_utils import set_seed
 n_mgene = 256
 # whether use the binary count or not
 COUNT_TYPE = "mean"
-DROP_ZEROS = False
+DROP_ZEROS = True
 
 res_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_{COUNT_TYPE}_{int(DROP_ZEROS)}")
 if not os.path.exists(res_dir):
