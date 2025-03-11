@@ -25,6 +25,8 @@ import trainer_mixprec as trainer
 # TODO: update to wandb
 from torch.utils.tensorboard import SummaryWriter
 
+from torch.nn.attention import sdpa_kernel, SDPBackend
+
 
 def initialize_services(log_dir):
     writer = SummaryWriter(log_dir=log_dir)
@@ -43,7 +45,7 @@ def main():
 
     n_mgene = 256
     model_config = get_default_config()
-    batch_size = 256
+    batch_size = 128
     # classifier for 4 gpus, 0.5e-5 too large for less than 4, slightly larger for bp16
     lr = 0.3e-5 * (batch_size/32)
 
@@ -70,10 +72,10 @@ def main():
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
-                                  "use_fastatten": False,
+                                  "use_fastatten": True,
                                   "pretrain_path": None,
                                   "precision": PRECISION,
-                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_mixprec/",
+                                  "checkpoint_path": "/project/cedula3/scFoundation/checkpoint/",
                                   "checkpoint_prefix": "cp_sum0_fourier_8_512",
                                   })
 
@@ -166,7 +168,8 @@ def main():
     # sync
     dist.barrier()
 
-    trainer.train_multigpus(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
+    with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
+        trainer.train_multigpus(model = fm_model, global_rank = global_rank, train_loader = train_loader, val_loader = val_loader, optimizer = optimizer, scheduler = scheduler, writer = writer,
                             initial_epoch = initial_epoch, initial_step = initial_step, log_step = 100)
 
                     

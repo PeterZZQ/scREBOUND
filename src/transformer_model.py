@@ -5,7 +5,7 @@ import math
 from dataclasses import dataclass
 import base_model
 
-from flash_transformer_layer import FlashTransformerEncoderLayer
+import flash_transformer_layer as flash_model
 
 @dataclass
 class ModelConfig:
@@ -149,14 +149,22 @@ class TransformerModel(nn.Module):
         
         # Construct the transformer layers, use torch transform directly, or use transformer in base_model.py
         # n_hidden = 2048, n_embed = 512
+        print("batch_size" ,model_config.batch_size)
+        print("Using flash attn", model_config.use_fastatten)
         if model_config.use_fastatten:
             # NOTE: need to use mixed precision
-            encoder_layers = FlashTransformerEncoderLayer(d_model = self.model_config.d_embed, 
-                                                        nhead = self.model_config.n_head,
-                                                        dim_feedforward = self.model_config.d_hidden,
-                                                        dropout = self.model_config.dropout)
+            # encoder_layers = FlashTransformerEncoderLayer(d_model = self.model_config.d_embed, 
+            #                                             nhead = self.model_config.n_head,
+            #                                             dim_feedforward = self.model_config.d_hidden,
+            #                                             dropout = self.model_config.dropout)
 
-            self.transformer_encoder = nn.TransformerEncoder(encoder_layers, model_config.n_layer)
+            # self.transformer_encoder = nn.TransformerEncoder(encoder_layers, model_config.n_layer)
+            self.transformer_encoder = flash_model.TransformerBlocks(d_model = self.model_config.d_embed,
+                                                                    n_head = self.model_config.n_head,
+                                                                    num_layers = self.model_config.n_layer,
+                                                                    dim_feedforward = self.model_config.d_hidden,
+                                                                    dropout = self.model_config.dropout,
+                                                                    activation = "gelu")
 
         else:            
             self.transformer_encoder = base_model.TransformerBlocks(d_model = self.model_config.d_embed,

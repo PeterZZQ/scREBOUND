@@ -1,15 +1,10 @@
-import gc
 import math
-from typing import Optional
-
 import torch
-import numpy as np
-from torch import nn, Tensor
+import torch.nn as nn
 import torch.nn.functional as F
-from tqdm import trange
 
 try:
-    from flash_attn.flash_attention import FlashMHA
+    from flash_attn import flash_attn_qkvpacked_func
 
     flash_attn_available = True
 except ImportError:
@@ -19,129 +14,92 @@ except ImportError:
     flash_attn_available = False
 
 print("flash_attn_available", flash_attn_available)
-class FlashTransformerEncoderLayer(nn.Module):
-    r"""TransformerEncoderLayer is made up of self-attn and feedforward network.
-    The class is modified from torch.nn.TransformerEncoderLayer to support the
-    FlashAttention.
 
-    Args:
-        d_model: the number of expected features in the input (required).
-        nhead: the number of heads in the multiheadattention models (required).
-        dim_feedforward: the dimension of the feedforward network model (default=2048).
-        dropout: the dropout value (default=0.1).
-        activation: the activation function of intermediate layer, relu or gelu (default=relu).
-        layer_norm_eps: the eps value in layer normalization components (default=1e-5).
-        batch_first: If ``True``, then the input and output tensors are provided
-            as (batch, seq, feature). Default: ``False``.
+class FlashTransformerLayer(nn.Module):
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, activation: str = "relu"):
+        super(FlashTransformerLayer, self).__init__()
+        assert d_model % nhead == 0, "d_model must be divisible by nhead"
+        self.nhead = nhead
+        self.head_dim = d_model // nhead
 
-    Examples::
-        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8)
-        >>> src = torch.rand(10, 32, 512)
-        >>> out = encoder_layer(src)
+        # Q, K, V projection layers
+        self.q_proj = nn.Linear(d_model, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        # Output projection
+        self.out_proj = nn.Linear(d_model, d_model)
 
-    Alternatively, when ``batch_first`` is ``True``:
-        >>> encoder_layer = nn.TransformerEncoderLayer(d_model=512, nhead=8, batch_first=True)
-        >>> src = torch.rand(32, 10, 512)
-        >>> out = encoder_layer(src)
-    """
-    __constants__ = ["batch_first"]
-
-    def __init__(
-        self,
-        d_model,
-        nhead,
-        dim_feedforward=2048,
-        dropout=0.1,
-        activation="relu",
-        layer_norm_eps=1e-5,
-        batch_first=True,
-        device=None,
-        dtype=None,
-        norm_scheme="post",  # "pre" or "post"
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.self_attn = FlashMHA(
-            embed_dim=d_model,
-            num_heads=nhead,
-            batch_first=batch_first,
-            attention_dropout=dropout,
-            **factory_kwargs,
-        )
-        # Version compatibility workaround
-        if not hasattr(self.self_attn, "batch_first"):
-            self.self_attn.batch_first = batch_first
-        # Implementation of Feedforward model
-        self.linear1 = nn.Linear(d_model, dim_feedforward, **factory_kwargs)
+        # Feed-forward network
+        self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, d_model, **factory_kwargs)
+        self.linear2 = nn.Linear(dim_feedforward, d_model)
 
-        self.norm1 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
-        self.norm2 = nn.LayerNorm(d_model, eps=layer_norm_eps, **factory_kwargs)
+        # Layer Normalization
+        self.norm1 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(d_model)
+
+        # Dropout layers for residual connections
         self.dropout1 = nn.Dropout(dropout)
         self.dropout2 = nn.Dropout(dropout)
 
-        self.activation = self._get_activation_fn(activation)
-        self.norm_scheme = norm_scheme
-        if self.norm_scheme not in ["pre", "post"]:
-            raise ValueError(f"norm_scheme should be pre or post, not {norm_scheme}")
-
-    @staticmethod
-    def _get_activation_fn(activation):
+        # Activation function
         if activation == "relu":
-            return F.relu
+            self.activation = F.relu
         elif activation == "gelu":
-            return F.gelu
-
-        raise RuntimeError("activation should be relu/gelu, not {}".format(activation))
-
-    def __setstate__(self, state):
-        if "activation" not in state:
-            state["activation"] = F.relu
-        super().__setstate__(state)
-
-    def forward(
-        self,
-        src: Tensor,
-        src_mask: Optional[Tensor] = None,
-        src_key_padding_mask: Optional[Tensor] = None,
-        **kwargs,
-    ) -> Tensor:
-        r"""Pass the input through the encoder layer.
-
-        Args:
-            src: the sequence to the encoder layer (required).
-            src_mask: the mask for the src sequence (optional).
-            src_key_padding_mask: the mask for the src keys per batch (optional).
-
-        Shape:
-            see the docs in Transformer class.
-        """
-        if src_mask is not None:
-            raise ValueError("FlashTransformerEncoderLayer does not support src_mask")
-
-        if not src_key_padding_mask.any().item():
-            # no padding tokens in src
-            src_key_padding_mask_ = None
+            self.activation = F.gelu
         else:
-            if src_key_padding_mask.dtype != torch.bool:
-                src_key_padding_mask = src_key_padding_mask.bool()
-            # NOTE: the FlashMHA uses mask 0 for padding tokens, which is the opposite
-            src_key_padding_mask_ = ~src_key_padding_mask
+            raise ValueError("activation can only be 'relu' or 'gelu'")
 
-        if self.norm_scheme == "pre":
-            src = self.norm1(src)
-            src2 = self.self_attn(src, key_padding_mask=src_key_padding_mask_)[0]
-            src = src + self.dropout1(src2)
-            src = self.norm2(src)
-            src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-            src = src + self.dropout2(src2)
-        else:
-            src2 = self.self_attn(src, key_padding_mask=src_key_padding_mask_)[0]
-            src = src + self.dropout1(src2)
-            src = self.norm1(src)
-            src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
-            src = src + self.dropout2(src2)
-            src = self.norm2(src)
+    def forward(self, x, src_key_padding_mask=None):
+        # x shape: (seq_len, batch, d_model) -> transpose to (batch, seq_len, d_model)
+        x = x.transpose(0, 1)
+        batch, seq_len, _ = x.shape
 
+        if src_key_padding_mask is not None:
+            raise NotImplementedError("FlashAttention V2 does not support key padding mask.")
+
+        # Compute Q, K, V projections. shape (batch, seq_len, d_model)
+        q = self.q_proj(x)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+
+        # Reshape to (batch, seq_len, nhead, head_dim)
+        q = q.view(batch, seq_len, self.nhead, self.head_dim)
+        k = k.view(batch, seq_len, self.nhead, self.head_dim)
+        v = v.view(batch, seq_len, self.nhead, self.head_dim)
+
+        # Stack Q, K, V into one tensor of shape (batch, seq_len, 3, nhead, head_dim)
+        qkv = torch.stack((q, k, v), dim=2)
+
+        softmax_scale = 1.0 / math.sqrt(self.head_dim)
+
+        # The output will have shape (batch, seq_len, nhead, head_dim)
+        attn_output = flash_attn_qkvpacked_func(qkv, dropout_p=self.dropout1.p, softmax_scale=softmax_scale, causal=False)
+
+        # Reshape to (batch, seq_len, d_model) and project to output dimension
+        attn_output = attn_output.reshape(batch, seq_len, -1)
+        attn_output = self.out_proj(attn_output)
+
+        x = self.norm1(x + self.dropout1(attn_output))
+
+        ff_output = self.linear2(self.dropout(self.activation(self.linear1(x))))
+        x = self.norm2(x + self.dropout2(ff_output))
+
+        # Transpose back to original shape: (seq_len, batch, d_model)
+        x = x.transpose(0, 1)
+        return x
+
+
+class TransformerBlocks(nn.Module):
+    def __init__(self, d_model: int, n_head: int, num_layers: int, dim_feedforward: int, dropout: float, activation: str = "gelu"):
+        super(TransformerBlocks, self).__init__()
+        self.layers = nn.ModuleList([
+            FlashTransformerLayer(d_model, n_head, dim_feedforward, dropout, activation)
+            for _ in range(num_layers)
+        ])
+
+    def forward(self, src, src_key_padding_mask=None):
+        for layer in self.layers:
+            src = layer(src, src_key_padding_mask)
         return src
+
