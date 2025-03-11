@@ -303,6 +303,34 @@ class TransformerBlocks(nn.Module):
         return src 
 
 
+def fourier_positional_encoding(x: torch.Tensor, embedding_dim: int):
+    """
+    Computes the Fourier-based positional embedding for a continuous value x in [0, 1].
+    
+    Args:
+        x (float): A continuous value in the range [0, 1].
+        embedding_dim (int): The dimensionality of the positional embedding.
+        
+    Returns:
+        numpy.ndarray: The positional embedding vector.
+    """
+    assert torch.max(x) <= 1, "x must be between 0 and 1"
+    assert torch.min(x) >= 0
+    # Half of the embedding dimension will be used for sin, and half for cos
+    half_dim = embedding_dim // 2
+    
+    # Define the frequencies as powers of 2
+    frequencies = 2 ** torch.arange(half_dim).to(x.device)
+    
+    # Compute the sine and cosine components
+    sin_components = torch.sin(frequencies * x)
+    cos_components = torch.cos(frequencies * x)
+    
+    # Concatenate the sin and cos components
+    positional_embedding = torch.concat([sin_components, cos_components], dim = -1)
+    
+    return positional_embedding
+
 # class CustomTransformerEncoderLayer(nn.Module):
 #     def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, dtype: torch.dtype = torch.float32):
 #         super(CustomTransformerEncoderLayer, self).__init__()

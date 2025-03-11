@@ -253,7 +253,7 @@ class sc_dataset_anndata(data.Dataset):
     """
     construct scdataset from anndata
     """
-    def __init__(self, adata_meta, npads = None, labels = None, batches = None, batch_size = 128, njobs = 1):
+    def __init__(self, adata_meta, dropzeros = True, npads = None, labels = None, batches = None, batch_size = 128, njobs = 1):
         """
         expr_path: stores the path to the expr data on disk
         gene_path: stores the path to the gene name of cells on disk 
@@ -267,7 +267,7 @@ class sc_dataset_anndata(data.Dataset):
         else:
             self.npads = npads
         # transform the anndata into sentences
-        expr, gene_name = tokenize_expr_para(adata_meta.X, njobs = njobs, nchunks = njobs, npads = self.npads)
+        expr, gene_name = tokenize_expr_para(adata_meta.X, njobs = njobs, nchunks = njobs, npads = self.npads, dropzeros = dropzeros)
         self.expr = expr.toarray().astype("float32")
         self.gene_name = gene_name.toarray().astype("int32")
 
@@ -305,7 +305,7 @@ class sc_dataset_anndata(data.Dataset):
 
 
 
-def preprocess_anndata(adata, feature_df, var_name = "gene_name", use_bin = False):
+def preprocess_anndata(adata, feature_df, var_name = "gene_name", count_type = "mean"):
     """
     Group the genes into meta-genes in adata, according to the hard-coded grouping information
     """
@@ -324,15 +324,22 @@ def preprocess_anndata(adata, feature_df, var_name = "gene_name", use_bin = Fals
     print(f"overlapping genes: {len(gene_ids)}")
 
     counts = adata_s.layers["counts"].toarray()
-    if use_bin:
+    if count_type == "binary":
         counts = (counts > 0).astype(int)
 
     meta_labels = feature_df.loc[gene_ids, "labels"].values.squeeze()
     counts_meta = np.zeros((adata_s.shape[0], len(np.unique(feature_df["labels"].values))))
     for label in np.unique(meta_labels):
-        counts_meta[:, label] = counts[:, meta_labels == label].sum(axis = 1)
+        if count_type == "sum":
+            counts_meta[:, label] = counts[:, meta_labels == label].sum(axis = 1)
+        elif count_type == "mean":
+            counts_meta[:, label] = counts[:, meta_labels == label].mean(axis = 1)
+        elif count_type == "binary":
+            counts_meta[:, label] = counts[:, meta_labels == label].mean(axis = 1)
+        else:
+            raise ValueError("count type can only be `sum', `mean', and `binary'.")
+        
     counts_meta = sp.csr_matrix(counts_meta)
-    
     adata_meta = anndata.AnnData(X = counts_meta, obs = adata_s.obs)
 
     adata_meta.layers["counts"] = adata_meta.X.copy().astype(int)

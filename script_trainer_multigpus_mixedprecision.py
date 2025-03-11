@@ -43,20 +43,20 @@ def main():
 
     n_mgene = 256
     model_config = get_default_config()
-    batch_size = 512
+    batch_size = 256
     # classifier for 4 gpus, 0.5e-5 too large for less than 4, slightly larger for bp16
-    lr = 0.5e-5 * (batch_size/32)
+    lr = 0.3e-5 * (batch_size/32)
 
+    # accuracy almost the same as fp32
     PRECISION = torch.float32
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
                                   "lr": lr, # important for hyper-parameter tuning
-                                  "n_warmup_stp_lr": 4000, # important for hyper-parameter tuning, 5-10% of total steps
                                   "d_embed": 512,
                                   "n_head": 8,  # TODO: make 12 head * 64 dimensions
                                   "d_hidden": 2048, 
-                                  "n_layer": 6,
+                                  "n_layer": 8,
                                   "d_output": 64,
                                   "dropout": 0.1, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
@@ -64,19 +64,20 @@ def main():
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 0.0,
                                   "sup_type": None,
+                                  "with_padding": False,
                                   "mlm_include_zero": False,
-                                  "count_mode": "continuous",
+                                  "count_mode": "fourier",
                                   "deep_injection": True,
                                   "use_discriminator": False, # improve the cluster with discriminator, could be used for finetunning
                                   "lamb_disc": 0.0,
                                   "use_fastatten": False,
                                   "pretrain_path": None,
                                   "precision": PRECISION,
-                                  "checkpoint_path":"/project/zzhang834/LLM_KD/checkpoint_mixprec/",
-                                  "checkpoint_prefix": "checkpoint_6_512",
+                                  "checkpoint_path": "/project/zzhang834/LLM_KD/checkpoint_mixprec/",
+                                  "checkpoint_prefix": "cp_sum0_fourier_8_512",
                                   })
 
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_mean_1")
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_sum_0")
     # load the token embedding
     token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False).to(model_config.precision)
 

@@ -146,6 +146,14 @@ fp[:] = feat_sents[:]
 fp.flush()
 del feat_sents
 
+# NOTE: cannot be used because of the mask 
+if False:
+    counts_norms = sp.vstack(counts_norm_list)
+    print(counts_norms.shape)
+    fp = np.memmap(res_dir / f"expr_gt_{n_mgene}.npz", dtype='float32', mode='w+', shape=(ncells, n_mgene))
+    fp[:] = counts_norms.toarray()[:]
+    fp.flush()
+
 print("Done.")
 
 # In[]

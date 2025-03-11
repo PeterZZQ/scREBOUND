@@ -27,6 +27,8 @@ class ModelConfig:
     sup_type: str | None
 
     # prediction manner
+    with_padding: bool
+    # to be removed
     mlm_include_zero: bool
     # whether use continuous or digitized count in transformer
     count_mode: str
@@ -73,6 +75,7 @@ def get_default_config() -> ModelConfig:
         checkpoint_path="checkpoint/",
         checkpoint_prefix="checkpoint",
         sup_type="classifier",
+        with_padding=True
     )
 
 
@@ -131,12 +134,17 @@ class TransformerModel(nn.Module):
             self.n_bins = 10
             # +1 for 0 
             self.expr_encoder = nn.Embedding(self.n_bins + 1, self.model_config.d_embed)
-            # 2. TODO: position embedding for continuous value
-        else:
+        elif self.model_config.count_mode == "continuous":
             # for continuous value
             self.expr_encoder = nn.Sequential(nn.Linear(1, self.model_config.d_embed),
-                                            nn.GELU(),
-                                            nn.LayerNorm(self.model_config.d_embed))
+                                              nn.GELU(),
+                                              nn.LayerNorm(self.model_config.d_embed))
+        else:
+            # fourier position embedding
+            self.expr_encoder = nn.Sequential(nn.Linear(32, self.model_config.d_embed),
+                                              nn.GELU(),
+                                              nn.LayerNorm(self.model_config.d_embed))
+
 
         
         # Construct the transformer layers, use torch transform directly, or use transformer in base_model.py
@@ -166,6 +174,8 @@ class TransformerModel(nn.Module):
 
         # deep injection, same as the MLP above with the choice of deep injection
         if self.model_config.deep_injection:
+            # self.n_tokens - 1: remove the masked token (not in the original gene sentance), 
+            # but include both cls and padding for reference
             self.expr_predictor = base_model.decoder(
                 n_input = self.model_config.d_output,
                 n_output = self.n_tokens - 1,
@@ -183,7 +193,7 @@ class TransformerModel(nn.Module):
                 full_block(self.model_config.d_output + self.n_batch, 2048, self.model_config.dropout), # add the batch condition
                 full_block(2048, 512, self.model_config.dropout),
                 full_block(512, 128, self.model_config.dropout),
-                nn.Linear(128, self.n_tokens - 1) # remove the masked token (not in the original gene sentance)
+                nn.Linear(128, self.n_tokens - 1) 
             )
 
 
@@ -230,14 +240,19 @@ class TransformerModel(nn.Module):
             expr_sent: the gene expression sentence, of the shape (n_batchs, n_tokens)
         """
         # padding mask: position of the padding place
-        padding_mask = (gene_sent == self.pad_idx)
+
+        if self.model_config.with_padding:
+            padding_mask = (gene_sent == self.pad_idx)
+        else:
+            padding_mask = None
 
         if mask is None:
             # add mask to the input data
             mask_prob = torch.full(gene_sent.shape, self.model_config.mask_prob).to(self.device)
             # do not add mask on padding and cls positions
             mask_prob[:, 0] = 0
-            mask_prob = mask_prob * (~ padding_mask)
+            if self.model_config.with_padding:
+                mask_prob = mask_prob * (~ padding_mask)
             # sample mask using bernoulli
             mask = torch.bernoulli(mask_prob).bool()
 
@@ -255,8 +270,11 @@ class TransformerModel(nn.Module):
 
         if self.model_config.count_mode == "digitize":
             expr_embed = self.expr_encoder(expr_sent_wmask.long()).to(self.model_config.precision) * math.sqrt(self.model_config.d_embed)
-        else:
+        elif self.model_config.count_mode == "continuous":
             expr_embed = self.expr_encoder(expr_sent_wmask.unsqueeze(2)) * math.sqrt(self.model_config.d_embed)
+        else:
+            expr_embed = base_model.fourier_positional_encoding(expr_sent_wmask.unsqueeze(2), embedding_dim = 32)
+            expr_embed = self.expr_encoder(expr_embed) * math.sqrt(self.model_config.d_embed)
 
         # with autocast(device_type="cuda", enabled = False):
         # src_key_padding_mask: the padding position is true, remainings are false

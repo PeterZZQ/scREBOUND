@@ -189,8 +189,7 @@ def main():
 
     n_mgene = 256
     # NOTE: save in localscratch for faster memory access
-    # data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_sum_0")
     # load the token embedding
     token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt")
 

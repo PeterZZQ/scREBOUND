@@ -25,7 +25,7 @@ from torch.utils import data
 sys.path.append("./src")
 
 import data_utils
-from transformer_model import TransformerModel, get_default_config, TransformerModelDigitize
+from transformer_model import TransformerModel, get_default_config
 import trainer_mixprec
 import utils
 import eval
@@ -128,15 +128,15 @@ feature_info = gene_embed_dict["labels"]
 # adata_test.layers["counts"] = adata_test.X.copy()
 
 adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
-adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
+adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta1.write_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
 
 adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
-adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
+adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta2.write_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
 
 adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
-adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
+adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta3.write_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
 
 # adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
@@ -147,6 +147,9 @@ adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_
 # take out the pancreas dataset
 adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
 adata_pancreas.layers["counts"] = adata_pancreas.X.copy()
+# meta_genes, meta_gene_sizes = np.unique(feature_info["labels"].values, return_counts = True)
+# meta_gene_sizes = meta_gene_sizes[np.argsort(meta_genes)]
+# adata_pancreas.X = sp.csr_matrix(adata_pancreas.X.toarray()/meta_gene_sizes[None, :])
 sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
 sc.pp.log1p(adata_pancreas)
 adata_test_meta4 = adata_pancreas
@@ -207,7 +210,7 @@ print(f"GPU - Using device: {device}")
 print(f"GPU - Loading dataset...")
 
 # NOTE: save in localscratch for faster memory access
-data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene")
+data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_sum_0")
 # data_dir = Path(f"/localscratch/ziqi/localscratch_tempdata/cellxgene")
 # load the token embedding
 token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False)
@@ -235,12 +238,22 @@ model_name = "checkpoint_6_512_contr10_1"
 model_dir = f"/project/zzhang834/LLM_KD/checkpoint_contr/{model_name}.pth"
 res_dir = f"results/finetune_contr/{model_name}/"
 
-# bf16 model
-model_name = "checkpoint_6_512_0_9999"
+# mixed precision model
+# model_name = "cp_sum1_continuous_4_512_1"
+model_name = "cp_sum1_fourier_4_512_1"
 model_dir = f"/project/zzhang834/LLM_KD/checkpoint_mixprec/{model_name}.pth"
-res_dir = f"results_fastatten/{model_name}/"
+res_dir = f"results_mixprec/{model_name}/"
+
+# # bf16 model
+# model_name = "checkpoint_8_512_1"
+# model_dir = f"/project/zzhang834/LLM_KD/checkpoint_bf16/{model_name}.pth"
+# res_dir = f"results_bf16/{model_name}/"
 
 
+# no padding
+model_name = "cp_sum0_fourier_8_512_1"
+model_dir = f"/project/zzhang834/LLM_KD/checkpoint_mixprec/{model_name}.pth"
+res_dir = f"results_mixprec/{model_name}/"
 
 state = torch.load(model_dir, weights_only = False)
 model_config = get_default_config()
@@ -253,10 +266,10 @@ for x, val in model_config.__dict__.items():
 
 labels = None
 batches = None
-test_dataset1 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta1, labels = labels, batches = batches, njobs = 16)
-test_dataset2 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta2, labels = labels, batches = batches, njobs = 16)
-test_dataset3 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta3, labels = labels, batches = batches, njobs = 16)
-test_dataset4 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta4, labels = labels, batches = batches, njobs = 16)
+test_dataset1 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta1, labels = labels, batches = batches, njobs = 16, dropzeros = model_config.with_padding)
+test_dataset2 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta2, labels = labels, batches = batches, njobs = 16, dropzeros = model_config.with_padding)
+test_dataset3 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta3, labels = labels, batches = batches, njobs = 16, dropzeros = model_config.with_padding)
+test_dataset4 = data_utils.sc_dataset_anndata(adata_meta = adata_test_meta4, labels = labels, batches = batches, njobs = 16, dropzeros = model_config.with_padding)
 
 test_loader1 = data.DataLoader(test_dataset1, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
 test_loader2 = data.DataLoader(test_dataset2, batch_size = 1, shuffle = False, pin_memory = True, num_workers = 8, prefetch_factor = 8)
@@ -265,8 +278,7 @@ test_loader4 = data.DataLoader(test_dataset4, batch_size = 1, shuffle = False, p
 
 print(f"GPU - Done.")
 
-# fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
-fm_model = TransformerModelDigitize(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device)
+fm_model = TransformerModel(model_config = model_config, token_embed = token_embed, n_batch = len(meta_dict["batch_code"]), n_label = len(meta_dict["label_code"]), device = device).to(model_config.precision)
 
 print(f"GPU - Preloading lastest model'")
 # Get the common keys between the current model and the saved model
@@ -278,67 +290,8 @@ print(f"GPU - Done.")
 
 
 # In[]
-# ------------------------------------------------------------------------------------------------------------------------
-#
-# Visualize the embedding and measure the batch effect removal
-#
-# ------------------------------------------------------------------------------------------------------------------------
-import trainer_mixprec
-import trainer
-
-
-def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
-    """
-    Description:
-    ------------
-        Obtain the model cell embedding for data in dataloader
-    
-    Parameters:
-    ------------
-        model: the transformer model
-        dataloader: the dataloader for the input data
-        mask_prob: the masking probability of data in the forward pass, default is 0
-
-    """
-    # NOTE: no token masking for cell embedding extraction
-    if multi_gpus:
-        model_acc = model.module
-    else:
-        model_acc = model
-
-    PRECISION = torch.bfloat16
-    model_acc.model_config.mask_prob = mask_prob
-
-    cell_embeds = []
-    labels = []
-    batchs = []
-    with torch.no_grad():
-        for data_sample in tqdm.tqdm(dataloader, desc=f"Calc embed"):
-            expr_sample = data_sample["expr"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
-            gene_sample = data_sample["gene"].squeeze(0).to(PRECISION).to(model_acc.device, non_blocking = True)
-            # Forward pass
-            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
-            cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
-
-            if "label" in data_sample.keys():
-                labels.append(data_sample["label"].squeeze(0).detach().cpu().numpy())
-            else:
-                labels.append(np.array([np.nan] * cell_embed.shape[0]))
-
-            if "batch" in data_sample.keys():
-                batchs.append(data_sample["batch"].squeeze(0).detach().cpu().numpy())
-            else:
-                batchs.append(np.array([np.nan] * cell_embed.shape[0]))
-
-    cell_embeds = sparse.vstack(cell_embeds)
-    labels = np.concatenate(labels, axis = 0)
-    batchs = np.concatenate(batchs, axis = 0)
-    meta = pd.DataFrame.from_dict({"labels": labels, "batchs": batchs})
-    adata = anndata.AnnData(X = cell_embeds, obs = meta.astype("category"))
-
-    return adata
-
-# In[]
+# import trainer, trainer_mixprec
+import trainer_mixprec as trainer
 # NOTE: calculate the embedding
 # TODO: issue, for the classifier, should the masked input be used??
 adata_embed1 = trainer.cell_embed(model = fm_model, dataloader = test_loader1, multi_gpus = False)

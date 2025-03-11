@@ -72,12 +72,20 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
         # predict the gene expression (batch_size, n_mgenes)
         expr_pred = model_acc.predict_expr(cell_embed = cell_embed, batch_cond = batch_sample)
 
-        recon_expr_sample = torch.vstack([expr_pred[x,y.long()] for x,y in enumerate(gene_sample)]) 
-        loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
-        if model_acc.model_config.mlm_include_zero:
-            # 0-expression gene
-            loss_mlm_zeroexpr = [expr_pred[x, model_acc.gene_idx[~torch.isin(model_acc.gene_idx, y)]].pow(2).sum() for x,y in enumerate(gene_sample)]
-            loss_mlm += sum(loss_mlm_zeroexpr)/len(loss_mlm_zeroexpr)
+        if model_acc.model_config.with_padding:
+            # cost too much time, save in advance        
+            recon_expr_sample = torch.vstack([expr_pred[x,y.long()] for x,y in enumerate(gene_sample)]) 
+            loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
+            # if model_acc.model_config.mlm_include_zero:
+            #     # 0-expression gene
+            #     loss_mlm_zeroexpr = [expr_pred[x, model_acc.gene_idx[~torch.isin(model_acc.gene_idx, y)]].pow(2).sum() for x,y in enumerate(gene_sample)]
+            #     loss_mlm += sum(loss_mlm_zeroexpr)/len(loss_mlm_zeroexpr)
+        else:
+            # NOTE: the expr_sample is of the same ordering across cells, 
+            # directly use the first expr_sample.shape[1] tokens to save time
+            recon_expr_sample = expr_pred[:, :expr_sample.shape[1]]
+            loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
+
 
         # 2. Classification loss between the predict label and the ground truth label
         if (label_sample is not None) and (model_acc.model_config.sup_type is not None):

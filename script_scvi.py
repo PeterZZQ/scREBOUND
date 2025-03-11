@@ -26,15 +26,15 @@ feature_info = gene_embed_dict["labels"]
 # adata_test.layers["counts"] = adata_test.X.copy()
 
 adata_test1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human.h5ad")
-adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name")
+adata_test_meta1 = data_utils.preprocess_anndata(adata_test1, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta1.write_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
 
 adata_test2 = anndata.read_h5ad("dataset/scIB/human_pancreas_norm_complexBatch.h5ad")
-adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name")
+adata_test_meta2 = data_utils.preprocess_anndata(adata_test2, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta2.write_h5ad("dataset/scIB/human_pancreas_norm_complexBatch_meta.h5ad")
 
 adata_test3 = anndata.read_h5ad("dataset/scIB/Lung_atlas_public.h5ad")
-adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name")
+adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_name = "gene_name", count_type = "sum")
 # adata_test_meta3.write_h5ad("dataset/scIB/Lung_atlas_public_meta.h5ad")
 
 # adata_test_meta1 = anndata.read_h5ad("dataset/scIB/Immune_ALL_human_meta.h5ad")
@@ -44,15 +44,17 @@ adata_test_meta3 = data_utils.preprocess_anndata(adata_test3, feature_info, var_
 
 # take out the pancreas dataset
 adata_pancreas = anndata.read_h5ad("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/pancreas/adata_meta256.h5ad")
-sc.pp.normalize_total(adata_pancreas, target_sum = 10e4, key_added = "libsize")
-sc.pp.log1p(adata_pancreas)
+# meta_genes, meta_gene_sizes = np.unique(feature_info["labels"].values, return_counts = True)
+# meta_gene_sizes = meta_gene_sizes[np.argsort(meta_genes)]
+# # make sure it is integer
+# adata_pancreas.X = sp.csr_matrix(adata_pancreas.X.toarray()/meta_gene_sizes[None, :]).astype(int)
 adata_test_meta4 = adata_pancreas
 
 
 # In[]
 # Run scVI
-adata_test = adata_test_meta3
-BATCH_KEY = "dataset"
+adata_test = adata_test_meta1
+BATCH_KEY = "batch"
 
 scvi.settings.seed = 0
 # NOTE: Step 1, Train scVI on reference scRNA-seq dataset
@@ -72,8 +74,11 @@ sc.tl.umap(adata_test)
 
 # adata_test.write_h5ad("results/scvi/adata_immune_all.h5ad")
 # adata_test.write_h5ad("results/scvi/adata_pancreas.h5ad")
-adata_test.write_h5ad("results/scvi/adata_lung.h5ad")
+# adata_test.write_h5ad("results/scvi/adata_lung.h5ad")
 
+# adata_test.write_h5ad("results/scvi/adata_meancount_immune_all.h5ad")
+# adata_test.write_h5ad("results/scvi/adata_meancount_pancreas.h5ad")
+# adata_test.write_h5ad("results/scvi/adata_meancount_lung.h5ad")
 
 # In[]
 import matplotlib.pyplot as plt
@@ -81,6 +86,10 @@ colormap =plt.cm.get_cmap("tab20")
 adata_embed1 = anndata.read_h5ad("results/scvi/adata_immune_all.h5ad")
 adata_embed2 = anndata.read_h5ad("results/scvi/adata_pancreas.h5ad")
 adata_embed3 = anndata.read_h5ad("results/scvi/adata_lung.h5ad")
+
+# adata_embed1 = anndata.read_h5ad("results/scvi/adata_meancount_immune_all.h5ad")
+# adata_embed2 = anndata.read_h5ad("results/scvi/adata_meancount_pancreas.h5ad")
+# adata_embed3 = anndata.read_h5ad("results/scvi/adata_meancount_lung.h5ad")
 
 # immune cell
 fig = utils.plot_embeds(embed = adata_embed1.obsm["X_umap"], annos = adata_embed1.obs[["final_annotation", "batch"]].astype("category"), markerscale = 15, figsize = (20, 17), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)

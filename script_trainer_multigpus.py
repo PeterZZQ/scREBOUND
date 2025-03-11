@@ -45,9 +45,10 @@ def main():
     model_config = get_default_config()
     batch_size = 512
     # classifier for 4 gpus, 0.5e-5 too large for less than 4, slightly larger for bp16
-    lr = 0.3e-5 * (batch_size/32)
+    lr = 0.5e-5 * (batch_size/32)
 
     PRECISION = torch.bfloat16
+    PRECISION = torch.float32
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -55,7 +56,7 @@ def main():
                                   "d_embed": 512,
                                   "n_head": 8,  # TODO: make 12 head * 64 dimensions
                                   "d_hidden": 2048, 
-                                  "n_layer": 8,
+                                  "n_layer": 4,
                                   "d_output": 64,
                                   "dropout": 0.1, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
@@ -63,6 +64,7 @@ def main():
                                   "lamb_kd": 0.0,
                                   "lamb_sup": 0.0,
                                   "sup_type": None,
+                                  "with_padding": True,
                                   "mlm_include_zero": False,
                                   "count_mode": "continuous",
                                   "deep_injection": True,
@@ -72,12 +74,12 @@ def main():
                                   "pretrain_path": None,
                                   "precision": PRECISION,
                                   "checkpoint_path":"/project/zzhang834/LLM_KD/checkpoint_bf16/",
-                                  "checkpoint_prefix": "checkpoint_8_512",
+                                  "checkpoint_prefix": "cp_sum1_continuous_4_512",
                                   })
     
     # construct dataset
     # NOTE: save in localscratch for faster memory access
-    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_mean_1")
+    data_dir = Path(f"/project/zzhang834/LLM_KD/dataset/cellxgene_sum_1")
     # load the token embedding
     token_embed = torch.load(data_dir / f"token_embed_{n_mgene}.pt", weights_only = False).to(model_config.precision)
 
@@ -95,7 +97,7 @@ def main():
                                                 batches = meta_dict["batch"], batch_size = model_config.batch_size)
 
     # train test split
-    train_size = int(0.98 * len(scdataset))
+    train_size = int(0.3 * len(scdataset))
     val_size = int(0.004 * len(scdataset))
 
     # the data is already pre-shuffled

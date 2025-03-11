@@ -66,12 +66,16 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
         # predict the gene expression (batch_size, n_mgenes)
         expr_pred = model_acc.predict_expr(cell_embed = cell_embed, batch_cond = batch_sample)
 
-        recon_expr_sample = torch.vstack([expr_pred[x,y.long()] for x,y in enumerate(gene_sample)]) 
-        loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
-        if model_acc.model_config.mlm_include_zero:
-            # 0-expression gene
-            loss_mlm_zeroexpr = [expr_pred[x, model_acc.gene_idx[~torch.isin(model_acc.gene_idx, y)]].pow(2).sum() for x,y in enumerate(gene_sample)]
-            loss_mlm += sum(loss_mlm_zeroexpr)/len(loss_mlm_zeroexpr)
+        if model_acc.model_config.with_padding:
+            recon_expr_sample = torch.vstack([expr_pred[x,y.long()] for x,y in enumerate(gene_sample)]) 
+            loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
+            # if model_acc.model_config.mlm_include_zero:
+            #     # 0-expression gene
+            #     loss_mlm_zeroexpr = [expr_pred[x, model_acc.gene_idx[~torch.isin(model_acc.gene_idx, y)]].pow(2).sum() for x,y in enumerate(gene_sample)]
+            #     loss_mlm += sum(loss_mlm_zeroexpr)/len(loss_mlm_zeroexpr)
+        else:
+            # NOTE: no padding, the order is cls, gene1, gene2, ... genem, same as reconstructed
+            loss_mlm = ((recon_expr_sample - expr_sample) * mask).pow(2).sum(1).mean()
 
         # 2. Classification loss between the predict label and the ground truth label
         if (label_sample is not None) and (model_acc.model_config.sup_type is not None):
@@ -174,12 +178,12 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
                     bins_array = torch.arange(0, 1, 1/model_acc.n_bins).to(model_acc.device, non_blocking = True)
                     expr_sample = torch.bucketize(expr_sample, bins_array)
                 else:
-                    # normalize the expression value range between 0 and 1
+                    # normalize the expression value range between 0 and 1 for both continuous and fourier
                     expr_sample /= torch.max(expr_sample, dim = 1, keepdim = True).values
                     
             # Forward pass
-            _, cell_embed, mask = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
-            cell_embeds.append(sparse.csr_matrix(cell_embed.detach().cpu().numpy()))  
+            _, cell_embed, _ = model_acc(gene_sent = gene_sample, expr_sent = expr_sample)
+            cell_embeds.append(sparse.csr_matrix(cell_embed.to(torch.float32).detach().cpu().numpy()))  
 
             if "label" in data_sample.keys():
                 labels.append(data_sample["label"].squeeze(0).detach().cpu().numpy())
