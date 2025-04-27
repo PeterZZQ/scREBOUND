@@ -15,8 +15,8 @@ sns.set_theme()
 
 sys.path.append("src/")
 import data_utils
-from transformer_model import TransformerModel, get_default_config
-import trainer as trainer
+from transformer import TransformerModel, get_default_config
+import trainer_meta as trainer_meta
 import utils as utils
 
 def evaluation(model, dataloader):
@@ -28,7 +28,7 @@ def evaluation(model, dataloader):
         val_loss_sup = 0.0
         val_loss_kd = 0.0
         for data_sample in tqdm.tqdm(dataloader, desc=f"Evaluation"):
-            loss, loss_mlm, loss_sup, loss_kd = trainer.infer_databatch(model, data_sample, multigpus = False)                            
+            loss, loss_mlm, loss_sup, loss_kd = trainer_meta.infer_databatch(model, data_sample, multigpus = False)                            
             val_loss += loss.item()
             val_loss_mlm += loss_mlm.item()
             val_loss_sup += loss_sup.item()
@@ -136,7 +136,7 @@ fig.savefig(res_dir + "test_loss.png", bbox_inches = "tight", dpi = 200)
 import scvi
 
 # TODO: issue, for the classifier, should the masked input be used??
-adata_test = trainer.cell_embed(model = fm_model, dataloader = test_loader, multi_gpus = False)
+adata_test = trainer_meta.cell_embed(model = fm_model, dataloader = test_loader, multi_gpus = False)
 
 adata_test.obsm["latent_umap"] = scvi.model.utils.mde(adata_test.X.toarray(), accelerator = "gpu", seed = 0)
 # adata_test.write_h5ad("res_testloader_0.3.h5ad")

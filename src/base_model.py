@@ -14,6 +14,13 @@ def one_hot(index, n_cat, dtype = torch.bfloat16) -> torch.Tensor:
     onehot.scatter_(1, index.type(torch.long), 1)
     return onehot.type(dtype)
 
+def full_block(in_features, out_features, p_drop=0.1):
+    return nn.Sequential(
+        nn.Linear(in_features, out_features, bias=True),
+        nn.LayerNorm(out_features),
+        nn.GELU(),
+        nn.Dropout(p=p_drop),
+    )
 
 class FCLayers(nn.Module):
     """
@@ -314,13 +321,13 @@ def fourier_positional_encoding(x: torch.Tensor, embedding_dim: int):
     Returns:
         numpy.ndarray: The positional embedding vector.
     """
-    assert torch.max(x) <= 1, "x must be between 0 and 1"
-    assert torch.min(x) >= 0
+    # assert torch.max(x) <= 1, "x must be between 0 and 1"
+    # assert torch.min(x) >= 0
     # Half of the embedding dimension will be used for sin, and half for cos
     half_dim = embedding_dim // 2
     
-    # Define the frequencies as powers of 2
-    frequencies = 2 ** torch.arange(half_dim).to(x.device)
+    # Define the frequencies as powers of 2, add 0.1 scaling to shrink value range (not necessary)
+    frequencies = 0.1 * 2 ** torch.arange(half_dim).to(x.device)
     
     # Compute the sine and cosine components
     sin_components = torch.sin(frequencies * x)
@@ -330,6 +337,140 @@ def fourier_positional_encoding(x: torch.Tensor, embedding_dim: int):
     positional_embedding = torch.concat([sin_components, cos_components], dim = -1)
     
     return positional_embedding
+
+
+# NOTE: batch-effect related factors include 
+# 1. the continuous variables: library size, non-zero gene expression level, house keeping genes, etc
+# 2. the categorical variables: sequencing technologies, donor conditions, etc
+# NOTE: issue, is the categorical values independent or related (independent use nn.Embed), most factors have independent categorical effect on batch effect
+
+
+class encoder_batchfactor(nn.Module):
+
+    def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
+        super().__init__()
+
+        self.n_cont_feat = n_cont_feat
+        self.n_cat_feat = len(n_cat_list)
+        self.n_embed = n_embed
+        
+        # NOTE: hard to bin the value directly, don't know the largest value??
+        self.enc_cont = nn.ModuleDict({})
+        for id in range(self.n_cont_feat):
+            self.enc_cont[str(id)] = nn.Sequential(full_block(in_features = 1, out_features = 64, p_drop = p_drop), 
+                                              nn.Linear(in_features = 64, out_features = self.n_embed))
+
+        self.enc_cat = nn.ModuleDict({})
+        for id in range(self.n_cat_feat):
+            self.enc_cat[str(id)] = nn.Embedding(num_embeddings = n_cat_list[id], embedding_dim = self.n_embed)            
+    
+        # parameter weight
+        self.weight = nn.Parameter(torch.randn((self.n_cont_feat + self.n_cat_feat)))
+        self.softmax = nn.Softmax()
+
+    def forward(self, batch_factors_cont, batch_factors_cat):
+        # assert batch_factors_cont.shape[1] == self.n_cont_feat
+        # assert batch_factors_cat.shape[1] == self.n_cat_feat
+
+        # softmax the weight values
+        weight = self.softmax(self.weight)
+
+        # continuous values
+        batch_embed = torch.zeros((batch_factors_cat.shape[0], self.n_embed), device = batch_factors_cat.device)
+        for id in range(self.n_cont_feat):
+            batch_embed += weight[id] * self.enc_cont[str(id)](batch_factors_cont[:, [id]])
+        
+        # categorical values
+        for id in range(self.n_cat_feat):
+            x_cat = batch_factors_cat[:, [id]].long()
+
+            # with 0 assignment for -1
+            mask = (x_cat == -1).squeeze()
+            x_cat[mask] = 0
+            embed = self.enc_cat[str(id)](x_cat).squeeze()
+            embed[mask] = 0.0  
+
+            batch_embed += weight[id + self.n_cont_feat] * embed
+
+        batch_embed = nn.functional.normalize(batch_embed, dim = 1)
+
+        return batch_embed, weight
+    
+
+class decoder_batchfactor(nn.Module):
+    def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
+        super().__init__()
+
+        self.n_cont_feat = n_cont_feat
+        self.n_cat_feat = len(n_cat_list)
+        self.n_embed = n_embed
+
+        self.dec_cont = nn.ModuleDict({})
+        for id in range(self.n_cont_feat):
+            self.dec_cont[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop), 
+                                              nn.Linear(in_features = 64, out_features = 1))
+
+        self.dec_cat = nn.ModuleDict({})
+        for id in range(self.n_cat_feat):
+            self.dec_cat[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop),
+                                             nn.Linear(in_features = 64, out_features = n_cat_list[id]))
+                                            #  nn.Softmax())
+            
+
+    def forward(self, batch_embed):
+        assert batch_embed.shape[1] == self.n_embed
+
+        batch_factors_cont = {}
+        batch_factors_cat = {}
+        for id in range(self.n_cont_feat):
+            batch_factors_cont[id] = self.dec_cont[str(id)](batch_embed)
+        for id in range(self.n_cat_feat):
+            batch_factors_cat[id] = self.dec_cat[str(id)](batch_embed)
+
+        return batch_factors_cont, batch_factors_cat
+
+from torch.autograd import Function
+# gradient reversal, necessary for discriminator training
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
+def gradient_reversal(x, alpha=1.0):
+    return GradientReversalFunction.apply(x, alpha)
+
+
+class MinMaxNormalization(nn.Module):
+    def __init__(self, eps: float = 1e-6):
+        super(MinMaxNormalization, self).__init__()
+        self.eps = eps  # A small value to avoid division by zero
+
+    def forward(self, x):
+        # Compute the min and max along the specified dimensions
+        x_max = x.max(dim=1, keepdim=True)[0]
+        # x_min is always 0
+        
+        # Normalize to [0, 1]
+        x_normalized = x / (x_max + self.eps)
+        return x_normalized
+
+class LogNormalization(nn.Module):
+    def __init__(self, eps: float = 1e-6, scale_factor: float = 10e4):
+        super(LogNormalization, self).__init__()
+        self.eps = eps
+        self.scale_factor = scale_factor
+    def forward(self, x):
+        x = x/(x.sum(dim = 1, keepdim = True) + self.eps) * self.scale_factor
+        x = torch.log1p(x)
+        return x
+
+
+
 
 # class CustomTransformerEncoderLayer(nn.Module):
 #     def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, dtype: torch.dtype = torch.float32):
