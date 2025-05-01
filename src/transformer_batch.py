@@ -35,8 +35,8 @@ class ModelConfig:
     insert_transformer: bool
 
     # discriminator
-    use_discriminator: bool
-    lamb_disc: float
+    # use_discriminator: bool
+    # lamb_disc: float
     
     # compression
     lamb_mincut: float
@@ -76,8 +76,8 @@ def get_default_config() -> ModelConfig:
         use_fourier=True,
         batch_enc="encoder",
         insert_transformer=True,
-        use_discriminator=False,
-        lamb_disc=0,
+        # use_discriminator=False,
+        # lamb_disc=0,
         sup_type=None,
         use_classifier=False,
         lamb_sup=0,
