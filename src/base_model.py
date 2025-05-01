@@ -464,9 +464,11 @@ class LogNormalization(nn.Module):
         super(LogNormalization, self).__init__()
         self.eps = eps
         self.scale_factor = scale_factor
-    def forward(self, x):
+    def forward(self, x, norm_1: bool):
         x = x/(x.sum(dim = 1, keepdim = True) + self.eps) * self.scale_factor
         x = torch.log1p(x)
+        if norm_1:
+            x = x/(x.sum(1, keepdim = True) + self.eps)
         return x
 
 

@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import base_model
 from data_utils import set_seed
 import graph_pool
+import contrastive
 
 import flash_transformer_layer as flash_model
 
@@ -25,6 +26,7 @@ class ModelConfig:
     dropout: float
     mask_prob: float
     dynamic_maskprob: bool
+    mask_batchfactor: bool
     recon_meta: bool
     use_fourier: bool
 
@@ -35,7 +37,14 @@ class ModelConfig:
     # discriminator
     use_discriminator: bool
     lamb_disc: float
+    
+    # compression
     lamb_mincut: float
+
+    # supervised finetuning
+    sup_type: str | None
+    lamb_sup: float
+    use_classifier: bool
 
     # model stats
     use_fastatten: bool
@@ -62,12 +71,16 @@ def get_default_config() -> ModelConfig:
         dropout=0.05,
         mask_prob=0.15,
         dynamic_maskprob=False,
+        mask_batchfactor=False,
         recon_meta=True,
         use_fourier=True,
         batch_enc="encoder",
         insert_transformer=True,
         use_discriminator=False,
-        lamb_disc=1,
+        lamb_disc=0,
+        sup_type=None,
+        use_classifier=False,
+        lamb_sup=0,
         lamb_mincut=1,
         use_fastatten=False,
         precision=torch.float32,
@@ -134,7 +147,8 @@ class TransformerModel(nn.Module):
             # cannot insert into the transformer if use one-hot encoding
             self.batch_encoder = base_model.encoder_batchfactor(n_cont_feat= batch_dict["n_cont_feats"],
                                                                 n_cat_list = batch_dict["n_cat_list"],
-                                                                n_embed = self.model_config.d_embed)
+                                                                n_embed = self.model_config.d_embed,
+                                                                p_drop = self.model_config.dropout)
 
             self.batch_proj = nn.Sequential(nn.Linear(self.model_config.d_embed, self.model_config.d_embed),
                                             nn.GELU(),
@@ -158,13 +172,18 @@ class TransformerModel(nn.Module):
         self.gene_compression.load_state_dict(token_dict["gpoolvanilla"])
         for param in self.gene_compression.parameters():
             param.requires_grad = False
-        self.gene_decompression = nn.Identity()
 
         if self.model_config.recon_meta:
             self.mask_embed = nn.Parameter(torch.randn((1, self.model_config.d_embed)))
-            self.n_genes = n_meta
-        else:
-            self.n_genes = token_embed.shape[0] 
+
+        self.n_meta = n_meta
+        self.n_genes = token_embed.shape[0] 
+
+        # self.gene_decompression = nn.Identity()
+        self.gene_decompression = nn.Sequential(nn.Linear(n_meta, self.n_genes),
+                                                nn.Softplus())
+        for param in self.gene_decompression.parameters():
+            param.requires_grad = False
         # ----------------------------------------------
 
         # gene name encoder, input: dimension of gene name embedding, token_dim
@@ -230,22 +249,48 @@ class TransformerModel(nn.Module):
 
         if self.model_config.batch_enc == "encoder":
             self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.model_config.d_embed,
-                                                    output_dim = self.n_genes, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+                                                    output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
         elif self.model_config.batch_enc == "onehot":
             # one-hot + a linear embedding
             self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.model_config.d_embed,
-                                                    output_dim = self.n_genes, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+                                                    output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
         else:
             self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = 0,
-                                                    output_dim = self.n_genes, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+                                                    output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+
+
+        self.label_dict = label_dict
+        self.label_dict["label_code"] = self.label_dict["label_bincode"].index.values
+        self.label_unknown = np.where(self.label_dict["label_code"] == "unknown--unknown")[0][0]
+        self.label_dict["label_bincode"] = torch.tensor(self.label_dict["label_bincode"].values).to(torch.float32).to(self.device)
+        self.batch_dict = batch_dict
+        if model_config.sup_type is not None:
+            # optionally. projection into contrastive space
+            if model_config.sup_type == "contrcb-proj":
+                self.project_contrastive = nn.Sequential(
+                    # base_model.full_block(self.model_config.d_output, self.model_config.d_output, self.model_config.dropout),
+                    nn.Linear(self.model_config.d_output, self.model_config.d_output))            
+            # checked
+            self.contrastive_label_mtx = self.calculate_contrastive_label()
+
+            if model_config.use_classifier:
+                n_labels = self.label_dict["label_bincode"].shape[1]
+                self.classifier = nn.Sequential(
+                    base_model.full_block(self.model_config.d_output, 2048, self.model_config.dropout), # no batch condition
+                    base_model.full_block(2048, 2048, self.model_config.dropout),
+                    nn.Linear(2048, n_labels) # predict the bincode from the data           
+                )
+                # weights for self.n_label classifiers
+                # self.classifier_weight = nn.Parameter(torch.randn(n_labels))
+                # BASELINE: weight for labels classifiers, the same for all classes
+                self.classifier_weight = 1/n_labels * torch.ones(n_labels).to(self.device)
+
+
+
 
         if model_config.use_discriminator:
-            self.label_dict = label_dict
             self.label_dict["label_batch"] = torch.tensor(self.label_dict["label_batch"]).bool().to(self.device)
-            self.label_unknown = np.where(self.label_dict["label_code"] == "unknown")[0][0]
-            self.batch_dict = batch_dict
             n_batch = self.batch_dict["cats"].shape[0]
-
             self.discriminator = nn.Sequential(base_model.full_block(self.model_config.d_output, 512, self.model_config.dropout),
                                                base_model.full_block(512, 512, self.model_config.dropout),
                                                base_model.full_block(512, 512, self.model_config.dropout),
@@ -258,45 +303,68 @@ class TransformerModel(nn.Module):
         
         self.to(self.device)
 
+    # NOTE: label_bincode has issue CL:0000192 (89) Tcell have the same bincode as CL:0000514 (618) Bcell
+    def calculate_contrastive_label(self):
+        print("calculate the positive, negative, and neutral label for each label...")
+        label_bincode = self.label_dict["label_bincode"]
+        assert torch.all(label_bincode[self.label_unknown] == 0)
+        ancestor_matrix = contrastive.find_ancestor(label_bincode, label_bincode, chunk_size = 16)
+        # ancestor_matrix = torch.hstack([label_bincode, torch.ones(label_bincode.shape[0], 1).to(label_bincode.device)])
+        descendent_matrix = contrastive.find_descend(label_bincode, label_bincode)
+        # descendent_matrix = ancestor_matrix.T.clone()
+        # remove same label, keep only strict ancestor
+        # equal_matrix = contrastive.exact_equal(label_bincode, label_bincode, chunk_size = 16)
+        equal_matrix = torch.eye(descendent_matrix.shape[0]).bool().to(label_bincode.device)
+        neutral_matrix = (ancestor_matrix & ~equal_matrix)
+
+        # NOTE: for the unknown cell, no descendent/positive, no negative, all neutral (no loss applied)
+        descendent_matrix[self.label_unknown, :] = False
+        neutral_matrix[self.label_unknown, :] = True
+
+        contr_label_matrix = -1 * torch.ones_like(descendent_matrix).to(label_bincode.device)
+        # descendent are positive samples
+        contr_label_matrix[descendent_matrix] = 1
+        contr_label_matrix[neutral_matrix] = 0
+        print("Done.")
+
+        return contr_label_matrix
+
 
     def freeze_fm_gradient(self, freeze_trans: bool, freeze_predictor: bool, freeze_batchenc: bool, freeze_compression: bool, freeze_discriminator: bool):
-        self.freeze_compression = freeze_compression
-        self.freeze_batchenc = freeze_batchenc
-        self.freeze_trans = freeze_trans
-        self.freeze_predictor = freeze_predictor
-        self.freeze_discriminator = freeze_discriminator
+        self.compression_grad = not freeze_compression
+        self.batchenc_grad = not freeze_batchenc
+        self.trans_grad = not freeze_trans
+        self.predict_grad = not freeze_predictor
+        self.discriminator_grad = not freeze_discriminator
 
-        if self.freeze_compression:
-            for param in self.gene_compression.parameters():
-                param.requires_grad = False
-            for param in self.gene_decompression.parameters():
-                param.requires_grad = False
+        for param in self.gene_compression.parameters():
+            param.requires_grad = self.compression_grad
+        for param in self.gene_decompression.parameters():
+            param.requires_grad = self.compression_grad
 
-        if self.freeze_batchenc:
+        if self.model_config.batch_enc is not None:
             for param in self.batch_encoder.parameters():
-                param.requires_grad = False
+                param.requires_grad = self.batchenc_grad
             for param in self.batch_proj.parameters():
-                param.requires_grad = False
+                param.requires_grad = self.batchenc_grad
         
-        if self.freeze_trans:
-            for param in self.transformer_encoder.parameters():
-                param.requires_grad = False
-            for param in self.decoder.parameters():
-                param.requires_grad = False
-            for param in self.expr_encoder.parameters():
-                param.requires_grad = False
-            for param in self.gene_encoder.parameters():
-                param.requires_grad = False
-            if self.model_config.recon_meta:
-                self.mask_embed.requires_grad = False
+        for param in self.transformer_encoder.parameters():
+            param.requires_grad = self.trans_grad
+        for param in self.decoder.parameters():
+            param.requires_grad = self.trans_grad
+        for param in self.expr_encoder.parameters():
+            param.requires_grad = self.trans_grad
+        for param in self.gene_encoder.parameters():
+            param.requires_grad = self.trans_grad
+        if self.model_config.recon_meta:
+            self.mask_embed.requires_grad = self.trans_grad
         
-        if self.freeze_predictor:
-            for param in self.expr_predictor.parameters():
-                param.requires_grad = False
+        for param in self.expr_predictor.parameters():
+            param.requires_grad = self.predict_grad
         
-        if (self.freeze_discriminator) & (self.model_config.use_discriminator):
+        if self.model_config.use_discriminator:
             for param in self.discriminator.parameters():
-                param.requires_grad = False
+                param.requires_grad = self.discriminator_grad
             
 
 
@@ -399,20 +467,19 @@ class TransformerModel(nn.Module):
         expr_pred_meta = self.expr_predictor(x = cell_embed, cond = batch_embed)
         expr_pred = self.gene_decompression(expr_pred_meta)
         return expr_pred, expr_pred_meta
+    
 
+    def calc_discriminator(self, cell_embed: torch.Tensor, label_batch: torch.Tensor | None = None):
+        """
+        cell_embed: the embedding of cells, returned from the foundation model
+        label_batch: the binary matrix showing the batches where each label exist, of shape (nlabels, nbatches)
+        """
+        # reverse the gradient of the model
+        reversed_embed = base_model.gradient_reversal(cell_embed, self.model_config.lamb_reverse)
+        batch_pred = self.discriminator(reversed_embed)
 
+        if label_batch is not None:
+            batch_pred = batch_pred.masked_fill(~label_batch, -float('inf'))
 
-from torch.autograd import Function
-# gradient reversal, necessary for discriminator training
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = alpha
-        return x.view_as(x)
+        return batch_pred
 
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.neg() * ctx.alpha, None
-
-def gradient_reversal(x, alpha=1.0):
-    return GradientReversalFunction.apply(x, alpha)
