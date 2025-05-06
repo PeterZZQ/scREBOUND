@@ -30,9 +30,7 @@ from transformer_batch import TransformerModel, get_default_config
 import trainer_batch as trainer_batch
 import utils
 # import eval
-# import batch_encode
-
-import batch_encode_new 
+import batch_encode 
 import warnings
 warnings.filterwarnings("ignore")
 
@@ -72,21 +70,36 @@ adata_test3.obs["batch_id"], batch_code = pd.factorize(adata_test3.obs["batch"])
 adata_test3.obs["label"] = adata_test3.obs["cell_type"]
 
 # In[]
+EVAL_DATA_DIR2 = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/dataset/evaluation_datasets/"
+adata_test4 = anndata.read_h5ad(EVAL_DATA_DIR2 + "covid19_aligned.h5ad")
+adata_test4.obs["batch_id"], batch_code = pd.factorize(adata_test4.obs["sample"])
+adata_test4.obs["label"] = adata_test4.obs["predicted.celltype.l1"]
+
+
+adata_test5 = anndata.read_h5ad(EVAL_DATA_DIR2 + "GBM_Fig4.h5ad")
+adata_test5.obs["batch_id"], batch_code = pd.factorize(adata_test5.obs["sample_id"])
+adata_test5.obs["label"] = adata_test5.obs["mstatus"]
+adata_test5.var_names_make_unique()
+
+# In[]
 # selection of test dataset
 data_case = "immune_all"
-# data_case = "pancreas"
-# data_case = "lung_atlas"
+data_case = "pancreas"
+data_case = "lung_atlas"
+data_case = "covid"
+data_case = "GBM"
 if data_case == "immune_all":
     adata_test = adata_test1.copy()
 elif data_case == "pancreas":
     adata_test = adata_test2.copy()
 elif data_case == "lung_atlas":
     adata_test = adata_test3.copy()
-if use_meta_input:
-    adata_test = data_utils.adata2meta(adata_test, feature_df = gene_info, var_name = "gene_name", normalize = False, count_type = "sum")
-    gene_list = None
-else:
-    gene_list = gene_info["feature_name"].values
+elif data_case == "covid":
+    adata_test = adata_test4.copy()
+elif data_case == "GBM":
+    adata_test = adata_test5.copy()
+
+gene_list = gene_info["feature_name"].values
 
 # In[]
 # function
@@ -99,6 +112,8 @@ print(f"GPU - Using device: {device}")
 PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
 data_dir = "/data/zzhang834/hs_download/"
 # data_dir = "/project/zzhang834/hs_download/"
+
+batch_name = "level2"
 
 # ------------------------------Update for the model selected---------------------------------------------------
 # NOTE: 1. vanilla model with only mlm loss
@@ -116,23 +131,53 @@ data_dir = "/data/zzhang834/hs_download/"
 # model_name = "cp_vanilla_4_512_meta_enc_trans_level0_1"
 # model_name = "cp_vanilla_4_512_meta_enc_trans_wmask_level0_1"
 # model_name = "cp_vanilla_4_512_meta_enc_trans_level2_1"
-model_name = "cp_vanilla_4_512_meta_enc_trans_wmask_level2_1"
+# model_name = "cp_vanilla_4_512_meta_enc_trans_wmask_level2_1"
+# model_name = "cp_vanilla_4_512_meta_enc_level2_1"
+# model_name = "cp_vanilla_4_512_meta_enc_wmask_level2_1"
 
-model_dir = PROJECT_DIR + f"checkpoint/{model_name}.pth"
-res_dir = PROJECT_DIR + f"results/checkpoint/{model_name}/"
+# model_dir = PROJECT_DIR + f"checkpoint/{model_name}.pth"
+# res_dir = PROJECT_DIR + f"results/checkpoint/{model_name}/"
 
 # NOTE: 2. finetune model
-# # disc model (not working)
-# model_name = "cp_disc1nomask_4_512_meta_maskprob0.4_1"
-# model_name = "cp_disc1_4_512_meta_maskprobdyn_1"
-# model_name = "cp_disc1_4_512_meta_maskprob0.15_1"
 # # contrastive model
-# model_name = "cp_contrcb1_4_512_meta_1"
 # model_name = "cp_contrcb1_4_512_meta_nobatch_1"
 # model_name = "cp_contrcbproj1_4_512_meta_nobatch_1"
+# model_name = "cp_contrcbproj21_4_512_meta_nobatch_1"
+
+# model_name = f"cp_contr1_4_512_meta_enc_trans_wmask_{batch_name}_1"
+# model_name = f"cp_contrcb1_4_512_meta_enc_trans_wmask_{batch_name}_1"
+# model_name = f"cp_contrcbproj1_4_512_meta_enc_trans_wmask_{batch_name}_1"
+# model_name = f"cp_contrcb1_4_512_meta_enc_wmask_{batch_name}_1"
+# model_name = f"cp_contrcbproj1_4_512_meta_enc_wmask_{batch_name}_1"
 
 # model_dir = PROJECT_DIR + f"checkpoint_finetune/{model_name}.pth"
 # res_dir = PROJECT_DIR + f"results/checkpoint_finetune/{model_name}/"
+
+# NOTE: compression-model 
+# single-layer
+# model_name = "cp_nofrz_4_512_lognorm_1"
+# model_name = "cp_frztrans_4_512_lognorm_1"
+# model_name = "cp_frzall_4_512_lognorm_1"
+
+# double layers
+# model_name = "cp_frztrans_4_512_lognorm2_1"
+# model_name = "cp_frzall_4_512_lognorm2_1"
+# model_name = "cp_nofrz_4_512_lognorm2_1"
+# model_name = "cp_hybrid_4_512_lognorm2_1"
+# model_name = "cp_frztrans_4_512_raw2_1"
+# model_name = "cp_nofrz_4_512_raw2_1"
+# model_name = "cp_hybrid_4_512_raw2_1"
+# model_name = "cp_hybrid_4_512_raw2_enc_wmask_level2_1"
+
+# model_dir = PROJECT_DIR + f"checkpoint_compress/{model_name}.pth"
+# res_dir = PROJECT_DIR + f"results/checkpoint_compress/{model_name}/"
+
+# NOTE: compression-finetune
+model_name = "cp_contrcbproj1_4_512_1"
+model_name = f"cp_contrcb1_4_512_raw2_enc_wmask_{batch_name}_1"
+model_dir = PROJECT_DIR + f"checkpoint_compress_finetune/{model_name}.pth"
+res_dir = PROJECT_DIR + f"results/checkpoint_compress_finetune/{model_name}/"
+
 
 if not os.path.exists(res_dir):
     os.makedirs(res_dir)
@@ -140,29 +185,21 @@ if not os.path.exists(res_dir):
 state = torch.load(model_dir, weights_only = False)
 model_config = get_default_config()
 model_config.__dict__.update(state["model_config"])
+model_config.recon_layers = 2
+
 for x, val in model_config.__dict__.items():
     print(x, end = ": ")
     print(val)
 # ------------------------------------------------------------------------------------------------------------------
-# directly extract from the model
-# compression_mask = state["compression_mask"]
-# if compression_mask is not None:
-#     token_embed = state["model_state_dict"]["token_embed.weight"].detach().cpu()
-# else:
-#     gene2meta_dict = torch.load(f"/localscratch/ziqi/hs_download/gene_embed_meta{n_mgene}_kmeans.pt", weights_only = False)
-#     token_embed = gene2meta_dict["gene_embed"].to(torch.float32)
-#     cls_embed = torch.load(data_dir + "token_embed.pt", weights_only = False)[-1, :]
-#     token_embed = torch.vstack([token_embed, cls_embed])
 
 token_dict = torch.load(data_dir + f"gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
-
+label_dict = torch.load(data_dir + "permuted/label_dict.pt", weights_only = False)
 if model_config.batch_enc is not None:
     # batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict_nomito.pt", weights_only = False)
-    batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_dict_batch_level0.pt")
+    batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_batch_{batch_name}.pt")
 else:
     batch_dict = None
 
-label_dict = torch.load(data_dir + "permuted/label_dict.pt", weights_only = False)
 fm_model = TransformerModel(model_config = model_config, token_dict = token_dict, batch_dict = batch_dict, label_dict = label_dict, device = device).to(model_config.precision)
 
 print(f"GPU - Preloading lastest model")
@@ -174,17 +211,14 @@ fm_model.load_state_dict(filtered_state_dict, strict=False)
 print(f"GPU - Done.")
 # In[]
 # align genes
-adata_test = data_utils.align_genes(adata_test, gene_list)
+if data_case != "covid":
+    adata_test = data_utils.align_genes(adata_test, gene_list)
 adata_test.layers["counts"] = adata_test.X.copy()
 
 if model_config.batch_enc is not None:
-    # batch_features = batch_encode.construct_batch_feats(adata_test, use_mito = False)
-    # batch_features_digitize, num_bucket = batch_encode.tokenize_batch_feats(batch_features, use_mito = False, expr_binsize = 1)
-    # batch_features_digitize = torch.tensor(batch_features_digitize.values, dtype = torch.float32)
-
-    batch_features = batch_encode_new.construct_batch_feats(adata = adata_test, use_mito = True, use_tech = False, use_nmeasure = False)
+    batch_features = batch_encode.construct_batch_feats(adata = adata_test, use_mito = True, use_tech = False, use_nmeasure = False)
     # batch_features.to_csv(f"../batch_encoding/feature_batch_{data_case}.csv")
-    batch_features_digitize, num_bucket = batch_encode_new.tokenize_batch_feats(batch_features, use_mito = True, use_tech = False, use_nmeasure = False, expr_binsize = 1)
+    batch_features_digitize, num_bucket = batch_encode.tokenize_batch_feats(batch_features, use_mito = True, use_tech = False, use_nmeasure = False, expr_binsize = 1)
     batch_features_digitize = torch.tensor(batch_features_digitize.values, dtype = torch.float32)
 
 else:
@@ -219,47 +253,55 @@ if "contr" in adata_embed.obsm.keys():
 
 adata_embed.write_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
 # In[]
-# adata_embed = anndata.read_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
+adata_embed = anndata.read_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
 
-use_rep = "latent"
-# use_rep = "contr"
 colormap =plt.cm.get_cmap("tab20")
+for use_rep in ["contr", "latent"]:
+    if f"X_umap_{use_rep}" in adata_embed.obsm.keys(): 
+        if data_case == "lung_atlas":
+            # Only lung_atlas has the patient group
+            annos = adata_embed.obs[["label", "batch_id", "patientGroup"]].astype("category")
+            fig = utils.plot_embeds(embed = adata_embed.obsm[f"X_umap_{use_rep}"], annos = annos, markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}.png", bbox_inches = "tight")
 
-if data_case == "lung_atlas":
-    # Only lung_atlas has the patient group
-    annos = adata_embed.obs[["label", "batch_id", "patientGroup"]].astype("category")
-    fig = utils.plot_embeds(embed = adata_embed.obsm[f"X_umap_{use_rep}"], annos = annos, markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-else:
-    if data_case == "immune_all":
-        figsize = (15, 7)
-    elif data_case == "pancreas":
-        figsize = (12, 7)
-    annos = adata_embed.obs[["label", "batch_id"]].astype("category")
-    fig = utils.plot_embeds(embed = adata_embed.obsm[f"X_umap_{use_rep}"], annos = annos, markerscale = 15, figsize = figsize, s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-fig.tight_layout()
-fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}.png", bbox_inches = "tight")
+            fig = utils.plot_by_batch(adata_embed.obsm[f"X_umap_{use_rep}"], annos = np.array([x for x in adata_embed.obs["label"].values]),
+                                    batches = np.array([x for x in adata_embed.obs["patientGroup"].values]), markerscale = 15, figsize = (12, 5), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_patient.png", bbox_inches = "tight")
 
-if data_case == "lung_atlas":
-    fig = utils.plot_by_batch(adata_embed.obsm[f"X_umap_{use_rep}"], annos = np.array([x for x in adata_embed.obs["label"].values]),
-                              batches = np.array([x for x in adata_embed.obs["patientGroup"].values]), markerscale = 15, figsize = (12, 5), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-    fig.tight_layout()
-    fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_patient.png", bbox_inches = "tight")
+            adata_embed_ctrl = adata_embed[adata_embed.obs["patientGroup"] == "Ctrl"]
+            adata_embed_parenchyma = adata_embed[adata_embed.obs["patientGroup"] == "Parenchyma"]
+            adata_embed_nan = adata_embed[adata_embed.obs["patientGroup"] == "nan"]
+            fig = utils.plot_embeds(embed = adata_embed_ctrl.obsm[f"X_umap_{use_rep}"], annos = adata_embed_ctrl.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_ctrl.png")
+            fig = utils.plot_embeds(embed = adata_embed_parenchyma.obsm[f"X_umap_{use_rep}"], annos = adata_embed_parenchyma.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_parenchyma.png")
+            fig = utils.plot_embeds(embed = adata_embed_nan.obsm[f"X_umap_{use_rep}"], annos = adata_embed_nan.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_nan.png")
 
-# In[]
-if data_case == "lung_atlas":
-    adata_embed_ctrl = adata_embed[adata_embed.obs["patientGroup"] == "Ctrl"]
-    adata_embed_parenchyma = adata_embed[adata_embed.obs["patientGroup"] == "Parenchyma"]
-    adata_embed_nan = adata_embed[adata_embed.obs["patientGroup"] == "nan"]
-    fig = utils.plot_embeds(embed = adata_embed_ctrl.obsm[f"X_umap_{use_rep}"], annos = adata_embed_ctrl.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-    fig.tight_layout()
-    fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_ctrl.png")
-    fig = utils.plot_embeds(embed = adata_embed_parenchyma.obsm[f"X_umap_{use_rep}"], annos = adata_embed_parenchyma.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-    fig.tight_layout()
-    fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_parenchyma.png")
-    fig = utils.plot_embeds(embed = adata_embed_nan.obsm[f"X_umap_{use_rep}"], annos = adata_embed_nan.obs[["label", "batch_id"]].astype("category"), markerscale = 15, figsize = (12, 7), s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
-    fig.tight_layout()
-    fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}_nan.png")
-
+        else:
+            if data_case == "immune_all":
+                figsize = (15, 7)
+                annos = adata_embed.obs[["label", "batch_id"]].astype("category")
+            elif data_case == "pancreas":
+                figsize = (12, 7)
+                annos = adata_embed.obs[["label", "batch_id"]].astype("category")
+            elif data_case == "covid":
+                figsize = (12, 7)
+                annos = adata_embed.obs[["label", "batch_id", "dataset"]].astype("category")
+                colormap = None
+            elif data_case == "GBM":
+                figsize = (12, 7)
+                annos = adata_embed.obs[["label", "batch_id", "treatment"]].astype("category")
+                colormap = None                
+                
+            fig = utils.plot_embeds(embed = adata_embed.obsm[f"X_umap_{use_rep}"], annos = annos, markerscale = 15, figsize = figsize, s = 1, alpha = 0.4, colormap = colormap, label_inplace = False)
+            fig.tight_layout()
+            fig.savefig(res_dir + f"{use_rep}_embed_scIB_{data_case}.png", bbox_inches = "tight")
 
 # In[]
 # # Check the compression model
@@ -297,8 +339,8 @@ from torch.amp import autocast
 def evaluate_mlm(model, dataloader, mask_prob):
     model.model_config.mask_prob = mask_prob
     # need to temperarily remove the discriminator loss, no label for mlm test
-    use_discriminator = model.model_config.use_discriminator
-    model.model_config.use_discriminator = False
+    # use_discriminator = model.model_config.use_discriminator
+    # model.model_config.use_discriminator = False
     sup_type = model.model_config.sup_type
     model.model_config.sup_type = None
     # need to remove the batch_factor_mask too
@@ -329,7 +371,7 @@ def evaluate_mlm(model, dataloader, mask_prob):
 
         print(f"Val Loss (TOTAL): {val_loss:.4f}, Val Loss (MLM): {val_loss_mlm:.4f}, Val Loss (DISC): {val_loss_disc:.4f}, Val Loss (MINCUT): {val_loss_mincut:.4f}, Val Loss (ORTHO): {val_loss_ortho:.4f}")
 
-    model.model_config.use_discriminator = use_discriminator
+    # model.model_config.use_discriminator = use_discriminator
     model.model_config.sup_type = sup_type
     model.model_config.mask_batchfactor = mask_batchfactor
 

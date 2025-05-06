@@ -20,96 +20,97 @@ def is_within_uint32_range(value):
 # Extract & Preprocess the data
 #
 # ----------------------------------------------------------------------------
-# match anchor of gene names
-geneid = np.loadtxt("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/geneid_select.txt", dtype = object)
-output_dir = "/localscratch/ziqi/hs_download/ordered/"
-data_dir = "/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/"
-# grouping of the gene expression counts according to the meta-genes
-cum_idx = 0
-tissues = ["all_remain", "pancreas", "blood", "brain", "heart", "intestine", "kidney", "lung"]
-# tissues = ["pancreas"]
-sizes = []
-for tissue in tissues:
-    input_dir = Path(f"{data_dir}{tissue}/")
-    files = [f for f in input_dir.glob("*.h5ad") if f.name[:9] == "partition"]
-    counts_metas = []
-    counts_metas_bin = []
-    meta_cells = []
-    print(f"{tissue}: found {len(files)} files in {input_dir}")
-    for idx, file in enumerate(files):
-        print(f"process chunk {cum_idx}...")
-        try:
-            sample_adata = anndata.read_h5ad(file)
-        except:
-            print(f"chunk {idx} corrupted, skip...")
-            continue
-        sample_adata.var.index = sample_adata.var["feature_id"].values
-        # select only the related genes
-        sample_adata = sample_adata[:, geneid].copy()
+# # match anchor of gene names
+# geneid = np.loadtxt("/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/geneid_select.txt", dtype = object)
+# output_dir = "/localscratch/ziqi/hs_download/ordered/"
+# data_dir = "/project/zzhang834/llm_dataset/CellXGeneCZI/data_download/"
+# # grouping of the gene expression counts according to the meta-genes
+# cum_idx = 0
+# tissues = ["all_remain", "pancreas", "blood", "brain", "heart", "intestine", "kidney", "lung"]
+# # tissues = ["pancreas"]
+# sizes = []
+# for tissue in tissues:
+#     input_dir = Path(f"{data_dir}{tissue}/")
+#     files = [f for f in input_dir.glob("*.h5ad") if f.name[:9] == "partition"]
+#     counts_metas = []
+#     counts_metas_bin = []
+#     meta_cells = []
+#     print(f"{tissue}: found {len(files)} files in {input_dir}")
+#     for idx, file in enumerate(files):
+#         print(f"process chunk {cum_idx}...")
+#         try:
+#             sample_adata = anndata.read_h5ad(file)
+#         except:
+#             print(f"chunk {idx} corrupted, skip...")
+#             continue
+#         sample_adata.var.index = sample_adata.var["feature_id"].values
+#         # select only the related genes
+#         sample_adata = sample_adata[:, geneid].copy()
         
-        obs = sample_adata.obs
-        var = sample_adata.var
-        print(sample_adata.shape)
+#         obs = sample_adata.obs
+#         var = sample_adata.var
+#         print(sample_adata.shape)
 
-        # NOTE: skip normalization, leave it to the training script
-        X_norm = sample_adata.X
+#         # NOTE: skip normalization, leave it to the training script
+#         X_norm = sample_adata.X
 
-        # normalize 
-        # print("normalization...")
-        # X = sample_adata.X.toarray()
-        # libsize = X.sum(axis = 1)
-        # X_norm = X/(libsize[:, None] + 1e-6) * 10e4
-        # X_norm = np.log1p(X_norm)
+#         # normalize 
+#         # print("normalization...")
+#         # X = sample_adata.X.toarray()
+#         # libsize = X.sum(axis = 1)
+#         # X_norm = X/(libsize[:, None] + 1e-6) * 10e4
+#         # X_norm = np.log1p(X_norm)
         
-        assert X_norm.shape[1] == 18790
+#         assert X_norm.shape[1] == 18790
         
-        # # transform X_norm to sparse for efficient saving
-        # X_norm = sp.csr_matrix(X_norm)
+#         # # transform X_norm to sparse for efficient saving
+#         # X_norm = sp.csr_matrix(X_norm)
 
 
 
-        print("save results...")
+#         print("save results...")
         
-        obs.to_parquet(os.path.join(output_dir, f"obs_{cum_idx}.parquet"))
-        if not os.path.exists(os.path.join(output_dir, "var.csv")):
-            # same across partitions
-            var.to_csv(os.path.join(output_dir, "var.csv"))
+#         obs.to_parquet(os.path.join(output_dir, f"obs_{cum_idx}.parquet"))
+#         if not os.path.exists(os.path.join(output_dir, "var.csv")):
+#             # same across partitions
+#             var.to_csv(os.path.join(output_dir, "var.csv"))
 
-        # extract the data and save 
-        data = X_norm.data.astype(np.float32)
-        data_memmap = np.memmap(os.path.join(output_dir, f"counts_data_{cum_idx}.npz"), dtype='float32', mode='w+', shape=data.shape)
-        data_memmap[:] = data[:]
-        data_memmap.flush()
+#         # extract the data and save 
+#         data = X_norm.data.astype(np.float32)
+#         data_memmap = np.memmap(os.path.join(output_dir, f"counts_data_{cum_idx}.npz"), dtype='float32', mode='w+', shape=data.shape)
+#         data_memmap[:] = data[:]
+#         data_memmap.flush()
         
-        # extract the indices and save
-        indices = X_norm.indices.astype(np.int16)
-        indices_memmap = np.memmap(os.path.join(output_dir, f"counts_indices_{cum_idx}.npz"), dtype='int16', mode='w+', shape=indices.shape)
-        indices_memmap[:] = indices[:]
-        indices_memmap.flush()
+#         # extract the indices and save
+#         indices = X_norm.indices.astype(np.int16)
+#         indices_memmap = np.memmap(os.path.join(output_dir, f"counts_indices_{cum_idx}.npz"), dtype='int16', mode='w+', shape=indices.shape)
+#         indices_memmap[:] = indices[:]
+#         indices_memmap.flush()
 
-        # extract the indptr and save, the value can be extremely large
-        indptr = X_norm.indptr.astype(np.uint32)
-        indptr_memmap = np.memmap(os.path.join(output_dir, f"counts_indptr_{cum_idx}.npz"), dtype='uint32', mode='w+', shape=indptr.shape)
-        # make sure the value can be saved with int32
-        assert is_within_uint32_range(np.max(indptr))
-        indptr_memmap[:] = indptr[:]
-        indptr_memmap.flush()
+#         # extract the indptr and save, the value can be extremely large
+#         indptr = X_norm.indptr.astype(np.uint32)
+#         indptr_memmap = np.memmap(os.path.join(output_dir, f"counts_indptr_{cum_idx}.npz"), dtype='uint32', mode='w+', shape=indptr.shape)
+#         # make sure the value can be saved with int32
+#         assert is_within_uint32_range(np.max(indptr))
+#         indptr_memmap[:] = indptr[:]
+#         indptr_memmap.flush()
 
-        sizes.append([data.shape[0], indices.shape[0], indptr.shape[0]])
+#         sizes.append([data.shape[0], indices.shape[0], indptr.shape[0]])
 
-        cum_idx += 1
+#         cum_idx += 1
 
-        del sample_adata, X_norm, obs
-        gc.collect()
+#         del sample_adata, X_norm, obs
+#         gc.collect()
 
-        print("Done.")
+#         print("Done.")
 
-sizes = np.array(sizes)
-np.savetxt(os.path.join(output_dir, "sizes.txt"), sizes)
+# sizes = np.array(sizes)
+# np.savetxt(os.path.join(output_dir, "sizes.txt"), sizes)
 
 # In[]
 # Merge the datasets across partitions
 data_dir = "/localscratch/ziqi/hs_download/ordered/"
+data_dir = "/data/zzhang834/hs_healthy_2025_01_30/ordered/"
 sizes = np.loadtxt(data_dir + "sizes.txt")
 
 # read meta-data
@@ -143,7 +144,7 @@ for partition_idx in range(0, len(sizes)):
     # Update the row pointer for the next file
     current_row += num_rows
     # remove the data file
-    os.remove(os.path.join(data_dir, f"counts_data_{partition_idx}.npz"))
+    # os.remove(os.path.join(data_dir, f"counts_data_{partition_idx}.npz"))
 # Flush changes to the output file
 data_cum.flush()
 
@@ -160,7 +161,7 @@ for partition_idx in range(0, len(sizes)):
     # Update the row pointer for the next file
     current_row += num_rows
     # remove the data file
-    os.remove(os.path.join(data_dir, f"counts_indices_{partition_idx}.npz"))
+    # os.remove(os.path.join(data_dir, f"counts_indices_{partition_idx}.npz"))
 # Flush changes to the output file
 indices_cum.flush()
 
@@ -186,7 +187,7 @@ for partition_idx in range(0, len(sizes)):
     # Update the row pointer for the next file
     current_row += num_rows
     # remove the data file
-    os.remove(os.path.join(data_dir, f"counts_indptr_{partition_idx}.npz"))
+    # os.remove(os.path.join(data_dir, f"counts_indptr_{partition_idx}.npz"))
 # Flush changes to the output file
 indptr_cum.flush()
 
@@ -197,8 +198,8 @@ indptr_cum.flush()
 # Shuffle the npz file 
 #
 # ----------------------------------------------------------------------------
-data_dir = "/localscratch/ziqi/hs_download/ordered/"
-output_dir = "/localscratch/ziqi/hs_download/permuted/"
+data_dir = "/data/zzhang834/hs_healthy_2025_01_30/ordered/"
+output_dir = "/data/zzhang834/hs_healthy_2025_01_30/permuted/"
 sizes = np.loadtxt(data_dir + "sizes.txt")
 
 meta_cells = []

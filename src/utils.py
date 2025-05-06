@@ -63,7 +63,7 @@ def plot_embeds(embed, annos, figsize = (20,10), axis_label = "Latent", label_in
             anno = np.array(annos[anno_name].values)
             
             if _kwargs["colormap"] is None:
-                colormap = plt.cm.get_cmap("tab20b", len(unique_anno))
+                colormap = plt.cm.get_cmap("tab20", len(unique_anno))
             else:
                 colormap = _kwargs["colormap"]
 

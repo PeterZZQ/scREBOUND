@@ -52,6 +52,7 @@ def main():
 
     # accuracy almost the same as fp32
     PRECISION = torch.float32
+    batch_name = "level2"
 
     model_config.__dict__.update({"batch_size": batch_size,
                                   "n_epoch": 1,
@@ -64,30 +65,23 @@ def main():
                                   "dropout": 0.1, # important for hyper-parameter tuning
                                   "mask_prob": 0.4, # important for hyper-parameter tuning
                                   "dynamic_maskprob": True, # mask_prob is dynamically updated from 0.1 to 0.7 during training
-                                  "mask_batchfactor": False,
+                                  "mask_batchfactor": True,
                                   "recon_meta": True,
                                   "use_fourier": True,
                                   "batch_enc": "encoder",
-                                  "insert_transformer": True,
+                                  "insert_transformer": False,
                                   "lamb_mincut": 1,
                                   "use_fastatten": True,
                                   "pretrain_path": None,
                                   "precision": PRECISION,
                                   "checkpoint_path": PROJECT_DIR + "checkpoint/",
-                                  "checkpoint_prefix": "cp_vanilla_4_512_meta_enc_trans_level0",
+                                  "checkpoint_prefix": f"cp_vanilla_4_512_meta_enc_wmask_{batch_name}",
                                   "lognorm_data": False
                                   })
 
     token_dict = torch.load(f"/project/zzhang834/hs_download/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
-
-
     label_dict = torch.load(data_dir + "label_dict.pt", weights_only = False)
-    # batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict.pt", weights_only = False)
-    # batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict_nomito.pt", weights_only = False)
-
-    # new
-    batch_name = "batch_level0"
-    batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_{batch_name}.pt", weights_only = False)
+    batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_batch_{batch_name}.pt", weights_only = False)
     batch_dict["cats"] = torch.tensor(batch_dict["cats"].values, dtype = torch.int32)
 
     fm_model = TransformerModel(model_config = model_config, token_dict = token_dict, batch_dict = batch_dict, label_dict = label_dict, device = device)
@@ -144,13 +138,13 @@ def main():
         fm_model.module.model_config.maskprob_step = (mask_prob_end - mask_prob_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
         fm_model.module.model_config.mask_prob = mask_prob_init
 
-    if fm_model.module.model_config.use_discriminator:
-        lamb_reverse_init = 1.0
-        lamb_reverse_end = 1.0
-        fm_model.module.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
-        fm_model.module.model_config.lamb_reverse = lamb_reverse_init
-    else:
-        fm_model.module.model_config.lamb_reverse = 0.0
+    # if fm_model.module.model_config.use_discriminator:
+    #     lamb_reverse_init = 1.0
+    #     lamb_reverse_end = 1.0
+    #     fm_model.module.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
+    #     fm_model.module.model_config.lamb_reverse = lamb_reverse_init
+    # else:
+    #     fm_model.module.model_config.lamb_reverse = 0.0
 
     # Init logger process, only main thread
     if global_rank == 0:
@@ -161,7 +155,7 @@ def main():
     # sync
     dist.barrier()
 
-    dataset_dict = {"DIR": data_dir, "num_partitions": num_partitions, "data_prefix": "counts", "meta_prefix": "obs", "batch_dict": batch_dict, "label_colname": "label_id", "batch_colname": batch_name + "_id"}
+    dataset_dict = {"DIR": data_dir, "num_partitions": num_partitions, "data_prefix": "counts", "meta_prefix": "obs", "batch_dict": batch_dict, "label_colname": "label_id", "batch_colname": "batch_" + batch_name + "_id"}
 
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         trainer_batch.train_multigpus(model = fm_model, global_rank = global_rank, dataset_dict = dataset_dict, writer = writer,

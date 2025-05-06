@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.distributed as dist
 from torch.nn.functional import sigmoid, softmax
 
+import torch.distributed.nn.functional as dist_func
+
 def compute_cross_entropy(p, q):
     q = nn.functional.log_softmax(q, dim=-1)
     loss = torch.sum(p * q, dim=-1)
@@ -20,13 +22,28 @@ def concat_all_gather(tensor):
     *** Warning ***: torch.distributed.all_gather has no gradient.
     NOTE: requires that the tensor to be the same size across gpus, which is not true with the filtered samples
     """
-    tensors_gather = [torch.ones_like(tensor)
-                      for _ in range(dist.get_world_size())]
+    # dist.get_world_size() returns the number of gpus
+    # create a list of n all-one tensor of size the same as input tensor, n is number of gpu
+    tensors_gather = [torch.ones_like(tensor) for _ in range(dist.get_world_size())]
+    # gather input tensor from all gpus, and fill in the tensors_gather
+    # NOTE: pass only tensor not gradient
     dist.all_gather(tensors_gather, tensor, async_op=False)
 
-    # output = torch.cat(tensors_gather, dim=0)
-    output = tensors_gather
+    output = torch.cat(tensors_gather, dim=0)
+    # output = tensors_gather
     return output
+
+
+def concat_all_gather_gradient(tensor):
+    """
+    Performs all_gather operation on the provided tensors. Slower
+    """
+    tensors_gather = dist_func.all_gather(tensor)
+    output = torch.cat(tensors_gather, dim=0)
+    return output
+
+
+
 
 
 def exact_equal(A, B, chunk_size = 16):
@@ -84,46 +101,49 @@ class SupContrLoss(nn.Module):
     """
     Supervised contrastive loss
     """
-    def __init__(self, temperature: float = 0.1):
+    def __init__(self, label_asso_mtx: torch.Tensor, temperature: float = 0.1):
         super(SupContrLoss, self).__init__()
+        self.label_asso_mtx = label_asso_mtx
         self.temperature = temperature
     
-    def forward(self, features, label_mtx, batch_ids = None):
+    def forward(self, features, label_ids, batch_ids = None):
         """
         features: feature embedding, of shape (ncells, nfeats)
-        label_mtx: binary identification matrix, of shape (ncells, ncells), pos: 1, neutral: 0, neg: -1
         """
         device = features.device
         
-        # update the label_mtx is batch is not None
+        # calculate the label association matrix given the samples
+        label_asso = self.label_asso_mtx[label_ids.unsqueeze(1), label_ids.unsqueeze(0)]
+
+        # update the label_asso is batch is not None
         if batch_ids is not None:
             # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
             # positive sample only includes the samples of the same cell type across batchs, but should the samples of the same cell type within the same batch be negative samples?
             batch_ids = batch_ids.contiguous().view(-1, 1)
             # (ncells, ncells) batch identification matrix, sample cell type in same batch: 1, remaining batch: 0
-            extra_neutral = torch.eq(batch_ids, batch_ids.T).float().to(device) * (label_mtx == 1).float()
+            extra_neutral = torch.eq(batch_ids, batch_ids.T).float().to(device) * (label_asso == 1).float()
             # remove self-similarity
             assert torch.all(torch.diag(extra_neutral) == 1)
             # these samples are neutral
-            label_mtx[extra_neutral.bool()] = 0
+            label_asso[extra_neutral.bool()] = 0
         else:
             # remove self-similarity
-            extra_neutral = torch.eye(label_mtx.shape[0]).to(label_mtx.device)
-            label_mtx[extra_neutral] = 0
+            extra_neutral = torch.eye(label_asso.shape[0]).to(label_asso.device)
+            label_asso[extra_neutral] = 0
 
         # -------------------------------------------
-        # Contrastive loss with ground truth matrix provided, label_mtx
+        # Contrastive loss with ground truth matrix provided, label_asso
         # compute logits
         logits = torch.matmul(features, features.T) / self.temperature
         # optional: minus the largest logit to stablize logits
         logits = stablize_logits(logits)
 
-        neutral_label = (label_mtx == 0)
+        neutral_label = (label_asso == 0)
         logits.masked_fill_(neutral_label, -1e7)
         # compute ground-truth distribution
         # for each sample, sum mask between the sample and all remaining samples, and clamp by 1 min to prevent 0 sum
         # more neighboring, more even the p is after normalization
-        pos_label = (label_mtx == 1).float()
+        pos_label = (label_asso == 1).float()
         p = pos_label / pos_label.sum(1, keepdim=True).clamp(min=1.0)
 
         # cross entropy loss, select and calculate only on non-neutral mask 
@@ -140,7 +160,7 @@ class SupContrLossMultiGPUs(nn.Module):
     Supervised contrastive loss
     """
     def __init__(self, label_asso_mtx: torch.Tensor, temperature: float = 0.1, unknown_label: int | None = None):
-        super(SupContrLoss, self).__init__()
+        super(SupContrLossMultiGPUs, self).__init__()
         self.label_asso_mtx = label_asso_mtx
         self.unknown_label = unknown_label
         self.temperature = temperature
@@ -148,15 +168,15 @@ class SupContrLossMultiGPUs(nn.Module):
     def forward(self, features, label_ids, batch_ids = None):
         """
         features: feature embedding, of shape (ncells, nfeats)
-        label_mtx: binary identification matrix, of shape (ncells, ncells), pos: 1, neutral: 0, neg: -1
+        label_asso: binary identification matrix, of shape (ncells, ncells), pos: 1, neutral: 0, neg: -1
         """
         device = features.device
 
         local_batch_size = features.size(0)
         # get all features across gpus
-        all_features = torch.cat(concat_all_gather(features), dim = 0)
+        all_features = concat_all_gather_gradient(features)
         # get all labels across gpus
-        all_label_ids = torch.cat(concat_all_gather(label_ids), dim = 0)
+        all_label_ids = concat_all_gather(label_ids)
 
         # label by all_labels association matrix
         label_asso = self.label_asso_mtx[label_ids.unsqueeze(1), all_label_ids.unsqueeze(0)]
@@ -167,12 +187,13 @@ class SupContrLossMultiGPUs(nn.Module):
                                       local_batch_size * dist.get_rank(),
                                       0).bool().to(device)
 
-        # update the label_mtx is batch is not None
+        # update the label_asso is batch is not None
         if batch_ids is not None:
             # NOTE: if the batch label is provided, the contrastive loss is applied only across batches to better remove batch effect
             # positive sample only includes the samples of the same cell type across batchs, but should the samples of the same cell type within the same batch be negative samples?
+            # cheaper than reshape(-1, 1)
             batch_ids = batch_ids.contiguous().view(-1, 1)
-            all_batch_ids = torch.cat(concat_all_gather(batch_ids), dim = 0)
+            all_batch_ids = concat_all_gather(batch_ids)
 
             # (ncells, ncells) batch identification matrix, sample cell type in same batch: 1, remaining batch: 0
             extra_neutral = torch.eq(batch_ids, all_batch_ids.T).float().to(device) * (label_asso == 1).float()
@@ -186,7 +207,7 @@ class SupContrLossMultiGPUs(nn.Module):
 
 
         # -------------------------------------------
-        # Contrastive loss with ground truth matrix provided, label_mtx
+        # Contrastive loss with ground truth matrix provided, label_asso
         # compute logits
         logits = torch.matmul(features, all_features.T) / self.temperature
 
@@ -215,6 +236,37 @@ class SupContrLossMultiGPUs(nn.Module):
         return loss
 
 
+
+
+
+def bce_weighted(pred, target, weight = None, eps = 1e-12):
+    """
+    Compute the binary cross-entropy loss from scratch.
+
+    Args:
+        pred (torch.Tensor): Predicted probabilities (values between 0 and 1) of shape (N, *).
+        target (torch.Tensor): Ground truth binary labels (0 or 1) with the same shape as pred.
+        eps (float): A small value to avoid log(0).
+
+    Returns:
+        torch.Tensor: The mean binary cross-entropy loss.
+    """
+    # Clamp predictions to avoid log(0)
+
+    pred = torch.clamp(sigmoid(pred), eps, 1 - eps)
+    
+    # Compute the element-wise binary cross-entropy loss
+    if weight is None:
+        loss = - (target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
+    else:
+        weight = softmax(weight, dim = 0)
+        loss = - (target * torch.log(pred) * weight[None, :] + (1 - target) * torch.log(1 - pred) * weight[None, :])
+        
+    # Return the mean loss over all elements
+    return loss.sum(dim = 1).mean()
+
+
+'''
 
 class _MultiPosConLoss(nn.Module):
     """
@@ -383,36 +435,6 @@ class _MultiPosConLossMultiGPUs(nn.Module):
         return loss
 
 
-
-
-def bce_weighted(pred, target, weight = None, eps = 1e-12):
-    """
-    Compute the binary cross-entropy loss from scratch.
-
-    Args:
-        pred (torch.Tensor): Predicted probabilities (values between 0 and 1) of shape (N, *).
-        target (torch.Tensor): Ground truth binary labels (0 or 1) with the same shape as pred.
-        eps (float): A small value to avoid log(0).
-
-    Returns:
-        torch.Tensor: The mean binary cross-entropy loss.
-    """
-    # Clamp predictions to avoid log(0)
-
-    pred = torch.clamp(sigmoid(pred), eps, 1 - eps)
-    
-    # Compute the element-wise binary cross-entropy loss
-    if weight is None:
-        loss = - (target * torch.log(pred) + (1 - target) * torch.log(1 - pred))
-    else:
-        weight = softmax(weight, dim = 0)
-        loss = - (target * torch.log(pred) * weight[None, :] + (1 - target) * torch.log(1 - pred) * weight[None, :])
-        
-    # Return the mean loss over all elements
-    return loss.sum(dim = 1).mean()
-
-
-'''
 class _MultiPosConLossMultiGPUs(nn.Module):
     """
     Multi-Positive Contrastive Loss: https://arxiv.org/pdf/2306.00984.pdf

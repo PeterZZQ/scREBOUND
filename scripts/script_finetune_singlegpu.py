@@ -28,7 +28,6 @@ def initialize_services(log_dir):
 # In[]
 data_utils.set_seed(0)
 PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
-# data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/permuted/"
 data_dir = "/data/zzhang834/hs_download/permuted/"
 # Define the device
 assert torch.cuda.is_available(), "Training on CPU is not supported"
@@ -44,16 +43,19 @@ lr = 0.3e-5 * (batch_size/32/8) # adjusted for 4 gpus
 
 # accuracy almost the same as fp32
 PRECISION = torch.float32
+# name of columns used when training
+batch_name = "level2"
 
 # vanilla model without batch
-# PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/cp_vanilla_4_512_meta_nobatch_1.pth"
+# model_name = "cp_vanilla_4_512_meta_1"
 
-# old batch-encoder
-# PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/cp_vanilla_4_512_meta_enc_trans_1.pth"
-# new batch-encoder
-batch_name = "level0"
-# PRETRAIN_MODEL = PROJECT_DIR + f"checkpoint/cp_vanilla_4_512_meta_enc_trans_{batch_name}_1.pth"
-PRETRAIN_MODEL = PROJECT_DIR + f"checkpoint/cp_vanilla_4_512_meta_enc_trans_wmask_{batch_name}_1.pth"
+# batch-encoder version
+model_name = f"cp_vanilla_4_512_meta_enc_{batch_name}_1"
+# model_name = f"cp_vanilla_4_512_meta_enc_wmask_{batch_name}_1"
+# model_name = f"cp_vanilla_4_512_meta_enc_trans_{batch_name}_1"
+# model_name = f"cp_vanilla_4_512_meta_enc_trans_wmask_{batch_name}_1"
+
+PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/" + model_name + ".pth"
 
 state = torch.load(PRETRAIN_MODEL, weights_only = False)
 model_config.__dict__.update(state["model_config"])
@@ -63,26 +65,27 @@ model_config.__dict__.update({"batch_size": batch_size,
                               "mask_prob": 0.10, # important for hyper-parameter tuning
                               "dynamic_maskprob": False, # mask_prob is dynamically updated from 0.1 to 0.7 during training
                               "recon_meta": True, # train on orig data
-                            #   "use_discriminator": False,
-                            #   "lamb_disc": 0,
                               "sup_type": "contrcb-proj",
                               "lamb_sup": 1,
                               "lamb_mincut": 0.1,
                               "precision": PRECISION,
                               "checkpoint_path": PROJECT_DIR + "checkpoint_finetune/",
-                              "checkpoint_prefix": "cp_contrcbproj1_4_512_meta_enc_trans_wmask_level0",
+                              "checkpoint_prefix": "cp_contrcbproj1_" + model_name.removeprefix("cp_vanilla_").removesuffix("_1"),
                               "lognorm_data": False
                             })
 
 
 token_dict = torch.load(f"/data/zzhang834/hs_download/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
-
 label_dict = torch.load(data_dir + "label_dict.pt", weights_only = False)
-# old
-# batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict_nomito.pt", weights_only = False)
-# new
-batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_batch_{batch_name}.pt")
-batch_dict["cats"] = torch.tensor(batch_dict["cats"].values, dtype = torch.int32)
+
+# NOTE: batch dict is only used for setting the batch-encoder and provide batch-features for training
+if model_config.batch_enc is not None:
+    batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_batch_{batch_name}.pt")
+    batch_dict["cats"] = torch.tensor(batch_dict["cats"].values, dtype = torch.int32)
+else:
+    # NOTE: the batch_column significantly affect the contrcb, level0 is the old one,
+    # can compare with level2, but level2 contrcb should be very similar to contrastive itself (same batch data not enough)
+    batch_dict = None
 
 fm_model = TransformerModel(model_config = model_config, token_dict = token_dict, batch_dict = batch_dict, label_dict = label_dict, device = device)
 
@@ -90,7 +93,6 @@ fm_model = TransformerModel(model_config = model_config, token_dict = token_dict
 # fm_model.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = True, freeze_discriminator = False)
 # # finetune the compression
 # fm_model.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = False, freeze_discriminator = False)
-
 
 # data information
 num_partitions = 55
@@ -123,13 +125,14 @@ if fm_model.model_config.dynamic_maskprob:
     fm_model.model_config.maskprob_step = (mask_prob_end - mask_prob_init) / steps_per_epoch / (fm_model.model_config.n_epoch - initial_epoch) * log_step
     fm_model.model_config.mask_prob = mask_prob_init
 
-if fm_model.model_config.use_discriminator:
-    lamb_reverse_init = 1.0
-    lamb_reverse_end = 1.0
-    fm_model.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.model_config.n_epoch - initial_epoch) * log_step
-    fm_model.model_config.lamb_reverse = lamb_reverse_init
-else:
-    fm_model.model_config.lamb_reverse = 0.0
+# if fm_model.model_config.use_discriminator:
+#     lamb_reverse_init = 1.0
+#     lamb_reverse_end = 1.0
+#     fm_model.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.model_config.n_epoch - initial_epoch) * log_step
+#     fm_model.model_config.lamb_reverse = lamb_reverse_init
+# else:
+#     fm_model.model_config.lamb_reverse = 0.0
+
 # Init logger process, only main thread
 writer = initialize_services(model_config.checkpoint_path + model_config.checkpoint_prefix) 
 

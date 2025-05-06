@@ -16,6 +16,7 @@ import anndata
 
 import os
 import pandas as pd
+from tqdm import tqdm
 
 def set_seed(seed):
     # Set seed for PyTorch
@@ -113,9 +114,10 @@ class sc_partition(data.Dataset):
 
         self.normalize = normalize
 
-        # load the batch features 
-        self.batch_feats_cont = batch_feats["conts"]
-        self.batch_feats_cat = batch_feats["cats"]
+        # load the batch features
+        self.batch_feats_cont = batch_feats["conts"] if batch_feats is not None else None
+        self.batch_feats_cat = batch_feats["cats"] if batch_feats is not None else None
+
 
 
     def load_partition(self, idx, label_colname = None, batch_colname = None, data_prefix = "counts", meta_prefix = "obs"):
@@ -213,6 +215,26 @@ def align_genes(adata, gene_list):
     adata_align = anndata.AnnData(sp.csr_matrix(X.values))
     adata_align.var = pd.DataFrame(index = X.columns)
     adata_align.obs = adata.obs
+    return adata_align
+
+
+def align_genes_memeff(adata, gene_align):
+    """
+    Memory efficient version: might be slower
+    """
+    gene_orig = adata.var.index.values.squeeze()
+    gene_common = np.intersect1d(gene_align, gene_orig)
+    gene_orig_common_position = np.array([np.where(gene_orig == x)[0][0] for x in gene_common])
+    gene_align_common_position = np.array([np.where(gene_align == x)[0][0] for x in gene_common])
+
+    counts_align = sp.lil_matrix((adata.shape[0], len(gene_align)))
+    for idx in tqdm(range(len(gene_common))):
+        counts_align[:, gene_align_common_position[idx]] = adata.X[:, gene_orig_common_position[idx]]
+
+    adata_align = anndata.AnnData(X = counts_align.tocsr())
+    adata_align.obs = adata.obs.copy()
+    adata_align.var.index = gene_align
+    
     return adata_align
 
 class sc_dataset_anndata(data.Dataset):

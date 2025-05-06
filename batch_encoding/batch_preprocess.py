@@ -7,7 +7,7 @@ from tqdm import tqdm
 import scipy.sparse as sp
 from multiprocessing import Pool
 
-import batch_encode_new as batch_encode
+import batch_encoding.batch_encode as batch_encode
 
 # In[]
 # ---------------------------------------------------------------------------------------------------------------------------------------

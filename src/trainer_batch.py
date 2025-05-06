@@ -85,58 +85,57 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
     if model_acc.model_config.recon_meta:
         *_, expr_sample_meta = model_acc.gene_compression(gene_embed = model_acc.token_embed, expr = expr_sample, log_norm = True)
         loss_mlm = ((expr_pred_meta - expr_sample_meta) * mask_gene).pow(2).sum(1).mean()
+    
     else:
         # NOTE: the mask here need to be on gene level
         # use log-norm
         norm = base_model.LogNormalization()
         # used softmax output, so norm1 has to be True
-        loss_mlm = ((expr_pred - norm(expr_sample, norm_1 = False)) * mask_gene).pow(2).sum(1).mean()
+        if model_acc.model_config.recon_type == "softmax":
+            norm_expr_sample = norm(expr_sample, norm_1 = True)
+            loss_mlm = ((expr_pred["mean"] - norm_expr_sample) * mask_gene).pow(2).sum(1).mean()
+
+        elif model_acc.model_config.recon_type == "lognorm":
+            norm_expr_sample = norm(expr_sample, norm_1 = False)
+            loss_mlm = ((expr_pred["mean"] - norm_expr_sample) * mask_gene).pow(2).sum(1).mean()
+
+        elif model_acc.model_config.recon_type == "raw":
+            assert model_acc.model_config.lognorm_data == False
+            libsize = expr_sample.sum(1)
+            expr_pred_mean = expr_pred["mean"] * libsize[:, None]
+            expr_pred_disp = expr_pred["disp"]
+            loss_mlm = - 1/model_acc.n_genes * base_model.log_nb_positive(x = expr_sample, mu = expr_pred_mean, theta = expr_pred_disp).mean()
 
     # --------------------------------------------------------------------------------------------------------------------
-    # NOTE: try discriminator here, has to be bincode classifier
-    if model_acc.model_config.use_discriminator:
-        # load discriminator related info: label_id, and batch_id
-        label_sample_id = data_sample["label"].reshape(-1).to(model_acc.device, non_blocking = True)
-        # remove unknown samples
-        known_samples = (label_sample_id != model_acc.label_unknown)
-        label_sample_id = label_sample_id[known_samples]
-        batch_sample_id = batch_sample_id[known_samples]
-        cell_embed = cell_embed[known_samples]
-        # for each cell type (label), bincode shows in which batch it exists
-        label_batch = model_acc.label_dict["label_batch"][label_sample_id, :].bool().to(model_acc.device)
-        # [NOTE opt] use of label_batch should improve the performance
-        # label_batch = None
-        batch_pred = model_acc.calc_discriminator(cell_embed, label_batch)
-
-        ce = nn.CrossEntropyLoss()
-        loss_batch = ce(batch_pred, batch_sample_id.long())
-    else:
-        loss_batch  = torch.tensor([0.0], device = model_acc.device)
+    # # NOTE: try discriminator here, has to be bincode classifier
+    loss_batch = torch.tensor([0.0], device = model_acc.device)
     
     # --------------------------------------------------------------------------------------------------------------------
     # add metric learning
     # 2. Classification loss between the predict label and the ground truth label
     if model_acc.model_config.sup_type is not None:
         label_sample_id = data_sample["label"].reshape(-1).to(model_acc.device, non_blocking = True)
-        unknown_samples = (label_sample_id == model_acc.label_unknown)
 
-        # remove unknown for better calculation
-        cell_embed = cell_embed[~unknown_samples]
-        label_sample_id = label_sample_id[~unknown_samples]
         if model_acc.model_config.sup_type == "contrastive":
             batch_label_contr = None
         else:
-            batch_label_contr = batch_sample_id[~unknown_samples]
+            batch_label_contr = batch_sample_id
 
-        if model_acc.model_config.sup_type == "contrcb-proj":
+        if multigpus:
+            contr = contrastive.SupContrLossMultiGPUs(label_asso_mtx = model_acc.contrastive_label_mtx, temperature = 0.07, unknown_label = model_acc.label_unknown)
+        else:
+            contr = contrastive.SupContrLoss(label_asso_mtx = model_acc.contrastive_label_mtx, temperature = 0.07)
+            
+            # remove unknown for better calculation, doesn't work for multi-gpus
+            unknown_samples = (label_sample_id == model_acc.label_unknown)
+            cell_embed = cell_embed[~unknown_samples]
+            label_sample_id = label_sample_id[~unknown_samples]
+            batch_label_contr = batch_label_contr[~unknown_samples]
+
+        if model_acc.project_contrastive is not None:
             cell_embed = nn.functional.normalize(model_acc.project_contrastive(cell_embed))
-
-
-        contr = contrastive.SupContrLoss(temperature = 0.07)
-        # To be incorporated in the future for larger batch in multi-gpus case
-        # contr = contrastive.SupContrLossMultiGPUs(label_asso_mtx = model_acc.contrastive_label_mtx, temperature = 0.07, unknown_label = model_acc.label_unknown)
-        contr_label_mtx_sample = model_acc.contrastive_label_mtx[label_sample_id.unsqueeze(1), label_sample_id.unsqueeze(0)]
-        loss_sup = contr(features = cell_embed, label_mtx = contr_label_mtx_sample, batch_ids = batch_label_contr)
+        
+        loss_sup = contr(features = cell_embed, label_ids = label_sample_id, batch_ids = batch_label_contr)
 
         # fine-tune for classification task
         if model_acc.model_config.use_classifier:
@@ -155,7 +154,7 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
     # l_mincut, l_ortho = graph_pool.mincut_loss(A = model_acc.gene_compression.A, S = S, add_orthogonality = True)
     l_mincut, l_ortho = model_acc.gene_compression.mincut_loss(add_ortho = True)
     
-    loss = loss_mlm + model_acc.model_config.lamb_disc * loss_batch + model_acc.model_config.lamb_mincut * (l_mincut + 0.01 * l_ortho) + model_acc.model_config.lamb_sup * loss_sup
+    loss = model_acc.model_config.lamb_mlm * loss_mlm + model_acc.model_config.lamb_mincut * (l_mincut + 0.01 * l_ortho) + model_acc.model_config.lamb_sup * loss_sup # + model_acc.model_config.lamb_disc * loss_batch
 
     return loss, {"mlm": loss_mlm.item(), "disc": loss_batch.item(), "mincut": l_mincut.item(), "ortho": l_ortho.item(), "metric": loss_sup.item()}
 
@@ -205,7 +204,7 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
                 all_embed, cell_embed, mask_gene = model(counts_norm = expr_sample, batch_factors_cont = batch_sample_cont, batch_factors_cat = batch_sample_cat, batch_ids = None)                    
                 cell_embeds.append(sparse.csr_matrix(cell_embed.to(torch.float32).detach().cpu().numpy()))  
                 # use contrcb-projector
-                if model_acc.model_config.sup_type == "contrcb-proj":
+                if (model_acc.model_config.sup_type == "contrcb-proj") | (model_acc.model_config.sup_type == "contrcb-proj2"):
                     cell_embed_contr = nn.functional.normalize(model_acc.project_contrastive(cell_embed))
                     cell_embeds_contr.append(sparse.csr_matrix(cell_embed_contr.to(torch.float32).detach().cpu().numpy()))
 
@@ -225,7 +224,7 @@ def cell_embed(model, dataloader, mask_prob: float = 0.0, multi_gpus = True):
     meta = pd.DataFrame.from_dict({"labels": labels, "batchs": batchs})
     adata = anndata.AnnData(X = cell_embeds, obs = meta.astype("category"))
 
-    if model_acc.model_config.sup_type == "contrcb-proj":
+    if (model_acc.model_config.sup_type == "contrcb-proj") | (model_acc.model_config.sup_type == "contrcb-proj2"):
         adata.obsm["contr"] = sparse.vstack(cell_embeds_contr)
 
     return adata
@@ -388,11 +387,17 @@ def train_multigpus(model, global_rank, dataset_dict, writer, initial_epoch, ini
                     if model.module.model_config.dynamic_maskprob:
                         model.module.model_config.mask_prob += model.module.model_config.maskprob_step
                     # update the reverse gradient weight 
-                    if model.module.model_config.use_discriminator:
-                        model.module.model_config.lamb_reverse += model.module.model_config.lamb_reverse_step
+                    # if model.module.model_config.use_discriminator:
+                    #     model.module.model_config.lamb_reverse += model.module.model_config.lamb_reverse_step
 
                     # sync all gpus after eval
                     dist.barrier()
+
+                # update the freezing status, after finish the first epoch
+                if (not model.module.model_config.recon_meta) and (step == int(0.2 * len(train_loader) * dataset_dict["num_partitions"])):
+                    print(f"unfreeze the model at step {step:d}")
+                    model.module.freeze_fm_gradient(freeze_trans = False, freeze_predictor = False, freeze_batchenc = False, freeze_compression = False)
+
                 step += 1   
         # end of the epoch, reset the init step as 0
         initial_step = 0
@@ -559,10 +564,14 @@ def train_singlegpu(model, dataset_dict, writer, initial_epoch, initial_step, lo
                     if model.model_config.dynamic_maskprob:
                         model.model_config.mask_prob += model.model_config.maskprob_step
                     # update the reverse gradient weight 
-                    if model.model_config.use_discriminator:
-                        model.model_config.lamb_reverse += model.model_config.lamb_reverse_step
+                    # if model.model_config.use_discriminator:
+                    #     model.model_config.lamb_reverse += model.model_config.lamb_reverse_step
 
-                    # sync all gpus after eval
+                # update the freezing status, after finish the first epoch
+                if (not model.model_config.recon_meta) and (step == int(0.2 * len(train_loader) * dataset_dict["num_partitions"])):
+                    print(f"unfreeze the model at step {step:d}")
+                    model.freeze_fm_gradient(freeze_trans = False, freeze_predictor = False, freeze_batchenc = False, freeze_compression = False)
+
                 step += 1   
         initial_step = 0
 

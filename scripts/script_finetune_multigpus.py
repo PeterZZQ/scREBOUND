@@ -52,34 +52,56 @@ def main():
 
     # accuracy almost the same as fp32
     PRECISION = torch.float32
-    
-    # PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/cp_vanilla_4_512_meta_enc_trans_1.pth"
-    PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/cp_vanilla_4_512_meta_nobatch_1.pth"
+
+    # name of columns used when training
+    batch_name = "level2"
+
+    # vanilla model without batch
+    # model_name = "cp_vanilla_4_512_meta_1"
+
+    # batch-encoder version
+    model_name = f"cp_vanilla_4_512_meta_enc_{batch_name}_1"
+    model_name = f"cp_vanilla_4_512_meta_enc_wmask_{batch_name}_1"
+    # model_name = f"cp_vanilla_4_512_meta_enc_trans_{batch_name}_1"
+    # model_name = f"cp_vanilla_4_512_meta_enc_trans_wmask_{batch_name}_1"
+
+    PRETRAIN_MODEL = PROJECT_DIR + "checkpoint/" + model_name + ".pth"
+
     state = torch.load(PRETRAIN_MODEL, weights_only = False)
     model_config.__dict__.update(state["model_config"])
     # further update
     model_config.__dict__.update({"batch_size": batch_size,
                                 "lr": lr,
-                                "mask_prob": 0.4, # important for hyper-parameter tuning
+                                "mask_prob": 0.10, # important for hyper-parameter tuning
                                 "dynamic_maskprob": False, # mask_prob is dynamically updated from 0.1 to 0.7 during training
-                                "recon_meta": False,
-                                "use_discriminator": False,
-                                "lamb_disc": 0,
-                                "lamb_mincut": 1,
+                                "recon_meta": True,
+                                "sup_type": "contrcb-proj",
+                                "lamb_sup": 1,
+                                "lamb_mincut": 0.1,
                                 "precision": PRECISION,
                                 "checkpoint_path": PROJECT_DIR + "checkpoint_finetune/",
-                                "checkpoint_prefix": "cp_vanilla_4_512_orig_nobatch_freezetrans_noexprscaling",
+                                "checkpoint_prefix": "cp_contrcbproj1_" + model_name.removeprefix("cp_vanilla_").removesuffix("_1"),
                                 "lognorm_data": False
                                 })
 
     token_dict = torch.load(f"/project/zzhang834/hs_download/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
-
-
     label_dict = torch.load(data_dir + "label_dict.pt", weights_only = False)
-    # batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict.pt", weights_only = False)
-    batch_dict = torch.load(PROJECT_DIR + "batch_encoding/batch_enc_dict_nomito.pt", weights_only = False)
+    
+    # NOTE: batch dict is only used for setting the batch-encoder and provide batch-features for training
+    if model_config.batch_enc is not None:
+        batch_dict = torch.load(PROJECT_DIR + f"batch_encoding/batch_dict_batch_{batch_name}.pt")
+        batch_dict["cats"] = torch.tensor(batch_dict["cats"].values, dtype = torch.int32)
+    else:
+        # NOTE: the batch_column significantly affect the contrcb, level0 is the old one,
+        # can compare with level2, but level2 contrcb should be very similar to contrastive itself (same batch data not enough)
+        batch_dict = None
 
     fm_model = TransformerModel(model_config = model_config, token_dict = token_dict, batch_dict = batch_dict, label_dict = label_dict, device = device)
+
+    # freeze the transformer and only train the discriminator as baseline
+    # fm_model.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = True, freeze_discriminator = False)
+    # # finetune the compression
+    # fm_model.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = False, freeze_discriminator = False)
 
     # wrap model into multi-gpus setting
     fm_model = DistributedDataParallel(fm_model, device_ids=[local_rank])
@@ -107,8 +129,6 @@ def main():
 
     initial_epoch = 0
     initial_step = 0
-    # If we couldn't find a model to preload, just start from scratch
-    print(f'GPU {local_rank} - Could not find model to preload. Starting from scratch')
 
     # calculate the dynamical value steps:
     log_step = 100
@@ -118,13 +138,13 @@ def main():
         fm_model.module.model_config.maskprob_step = (mask_prob_end - mask_prob_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
         fm_model.module.model_config.mask_prob = mask_prob_init
 
-    if fm_model.module.model_config.use_discriminator:
-        lamb_reverse_init = 0.0
-        lamb_reverse_end = 1.0
-        fm_model.module.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
-        fm_model.module.model_config.lamb_reverse = lamb_reverse_init
-    else:
-        fm_model.module.model_config.lamb_reverse = 0.0
+    # if fm_model.module.model_config.use_discriminator:
+    #     lamb_reverse_init = 0.0
+    #     lamb_reverse_end = 1.0
+    #     fm_model.module.model_config.lamb_reverse_step = (lamb_reverse_end - lamb_reverse_init) / steps_per_epoch / (fm_model.module.model_config.n_epoch - initial_epoch) * log_step
+    #     fm_model.module.model_config.lamb_reverse = lamb_reverse_init
+    # else:
+    #     fm_model.module.model_config.lamb_reverse = 0.0
 
     # Init logger process, only main thread
     if global_rank == 0:
@@ -135,12 +155,7 @@ def main():
     # sync
     dist.barrier()
 
-    dataset_dict = {"DIR": data_dir, "num_partitions": num_partitions, "data_prefix": "counts", "meta_prefix": "obs", "batch_dict": batch_dict}
-
-    # # NOTE: freeze the gradient of the model except for the discriminator
-    # fm_model.module.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = True, freeze_discriminator = False)
-    # finetune the compression
-    fm_model.module.freeze_fm_gradient(freeze_trans = True, freeze_predictor = True, freeze_batchenc = True, freeze_compression = False, freeze_discriminator = False)
+    dataset_dict = {"DIR": data_dir, "num_partitions": num_partitions, "data_prefix": "counts", "meta_prefix": "obs", "batch_dict": batch_dict, "label_colname": "label_id", "batch_colname": "batch_" + batch_name + "_id"}
 
     with sdpa_kernel(SDPBackend.FLASH_ATTENTION):
         trainer_batch.train_multigpus(model = fm_model, global_rank = global_rank, dataset_dict = dataset_dict, writer = writer,

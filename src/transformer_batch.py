@@ -40,6 +40,9 @@ class ModelConfig:
     
     # compression
     lamb_mincut: float
+    recon_type: str
+    recon_layers: int
+    lamb_mlm: float
 
     # supervised finetuning
     sup_type: str | None
@@ -82,6 +85,9 @@ def get_default_config() -> ModelConfig:
         use_classifier=False,
         lamb_sup=0,
         lamb_mincut=1,
+        recon_type="lognorm",
+        recon_layers=1,
+        lamb_mlm=1,
         use_fastatten=False,
         precision=torch.float32,
         pretrain_path=None,
@@ -121,6 +127,44 @@ class ConditionalPredictor(nn.Module):
 
         x = self.activation(x)
         return x
+
+
+class gene_decompression(nn.Module):
+    def __init__(self, n_meta, n_layers, n_genes, recon_type = "lognorm", dropout = 0.0):
+        super().__init__()
+
+        latent_dim = 512
+        self.recon_type = recon_type
+        
+        self.layers = nn.ModuleList()
+        if n_layers > 1:
+            self.layers.append(base_model.full_block(n_meta, latent_dim, p_drop = dropout))
+            for layer in range(1, n_layers - 1):
+                self.layers.append(base_model.full_block(latent_dim, latent_dim, p_drop = dropout))
+            self.layers.append(nn.Linear(latent_dim, n_genes))
+        else:
+            self.layers.append(nn.Linear(n_meta, n_genes))
+
+        if self.recon_type == "lognorm":
+            self.gene_act = nn.Softplus()
+        elif self.recon_type == "softmax":
+            self.gene_act = nn.Softmax(dim = -1)
+        elif self.recon_type == "raw":
+            self.gene_act = nn.Softmax(dim = -1)
+            self.dispersion = nn.Sequential(nn.Linear(latent_dim, n_genes))
+        
+    def forward(self, x):
+        if len(self.layers) > 1:
+            for idx, layer in enumerate(self.layers[:-1]):
+                x = layer(x)
+
+        if self.recon_type == "raw":
+            x_mean = self.gene_act(self.layers[-1](x))
+            x_disp = torch.exp(self.dispersion(x))
+            return {"mean": x_mean, "disp": x_disp}
+        else:
+            x = self.gene_act(self.layers[-1](x))
+            return {"mean": x}
 
 
 class TransformerModel(nn.Module):
@@ -179,9 +223,7 @@ class TransformerModel(nn.Module):
         self.n_meta = n_meta
         self.n_genes = token_embed.shape[0] 
 
-        # self.gene_decompression = nn.Identity()
-        self.gene_decompression = nn.Sequential(nn.Linear(n_meta, self.n_genes),
-                                                nn.Softplus())
+        self.gene_decompression = gene_decompression(n_meta = self.n_meta, n_layers = self.model_config.recon_layers, n_genes = self.n_genes, recon_type = model_config.recon_type, dropout = 0.0)
         for param in self.gene_decompression.parameters():
             param.requires_grad = False
         # ----------------------------------------------
@@ -194,9 +236,6 @@ class TransformerModel(nn.Module):
                                                       
 
 
-
-
-        
         if self.model_config.use_fourier:
             # fourier position embedding
             self.expr_encoder = nn.Sequential(nn.Linear(32, self.model_config.d_embed),
@@ -263,13 +302,21 @@ class TransformerModel(nn.Module):
         self.label_dict["label_code"] = self.label_dict["label_bincode"].index.values
         self.label_unknown = np.where(self.label_dict["label_code"] == "unknown--unknown")[0][0]
         self.label_dict["label_bincode"] = torch.tensor(self.label_dict["label_bincode"].values).to(torch.float32).to(self.device)
-        self.batch_dict = batch_dict
+
         if model_config.sup_type is not None:
             # optionally. projection into contrastive space
             if model_config.sup_type == "contrcb-proj":
                 self.project_contrastive = nn.Sequential(
-                    # base_model.full_block(self.model_config.d_output, self.model_config.d_output, self.model_config.dropout),
+                    nn.Linear(self.model_config.d_output, self.model_config.d_output))  
+                
+            elif model_config.sup_type == "contrcb-proj2":
+                self.project_contrastive = nn.Sequential(
+                    nn.Linear(self.model_config.d_output, self.model_config.d_output),
+                    nn.GELU(),
                     nn.Linear(self.model_config.d_output, self.model_config.d_output))            
+            else:
+                self.project_contrastive = None
+
             # checked
             self.contrastive_label_mtx = self.calculate_contrastive_label()
 
@@ -286,20 +333,16 @@ class TransformerModel(nn.Module):
                 self.classifier_weight = 1/n_labels * torch.ones(n_labels).to(self.device)
 
 
-
-
-        if model_config.use_discriminator:
-            self.label_dict["label_batch"] = torch.tensor(self.label_dict["label_batch"]).bool().to(self.device)
-            n_batch = self.batch_dict["cats"].shape[0]
-            self.discriminator = nn.Sequential(base_model.full_block(self.model_config.d_output, 512, self.model_config.dropout),
-                                               base_model.full_block(512, 512, self.model_config.dropout),
-                                               base_model.full_block(512, 512, self.model_config.dropout),
-                                               nn.Linear(512, n_batch))
-            
-
-
-        else:
-            self.discriminator = None
+        # self.batch_dict = batch_dict
+        # if model_config.use_discriminator:
+        #     self.label_dict["label_batch"] = torch.tensor(self.label_dict["label_batch"]).bool().to(self.device)
+        #     n_batch = self.batch_dict["cats"].shape[0]
+        #     self.discriminator = nn.Sequential(base_model.full_block(self.model_config.d_output, 512, self.model_config.dropout),
+        #                                        base_model.full_block(512, 512, self.model_config.dropout),
+        #                                        base_model.full_block(512, 512, self.model_config.dropout),
+        #                                        nn.Linear(512, n_batch))
+        # else:
+        #     self.discriminator = None
         
         self.to(self.device)
 
@@ -330,12 +373,11 @@ class TransformerModel(nn.Module):
         return contr_label_matrix
 
 
-    def freeze_fm_gradient(self, freeze_trans: bool, freeze_predictor: bool, freeze_batchenc: bool, freeze_compression: bool, freeze_discriminator: bool):
+    def freeze_fm_gradient(self, freeze_trans: bool, freeze_predictor: bool, freeze_batchenc: bool, freeze_compression: bool):
         self.compression_grad = not freeze_compression
         self.batchenc_grad = not freeze_batchenc
         self.trans_grad = not freeze_trans
         self.predict_grad = not freeze_predictor
-        self.discriminator_grad = not freeze_discriminator
 
         for param in self.gene_compression.parameters():
             param.requires_grad = self.compression_grad
@@ -362,10 +404,6 @@ class TransformerModel(nn.Module):
         for param in self.expr_predictor.parameters():
             param.requires_grad = self.predict_grad
         
-        if self.model_config.use_discriminator:
-            for param in self.discriminator.parameters():
-                param.requires_grad = self.discriminator_grad
-            
 
 
         
@@ -469,17 +507,17 @@ class TransformerModel(nn.Module):
         return expr_pred, expr_pred_meta
     
 
-    def calc_discriminator(self, cell_embed: torch.Tensor, label_batch: torch.Tensor | None = None):
-        """
-        cell_embed: the embedding of cells, returned from the foundation model
-        label_batch: the binary matrix showing the batches where each label exist, of shape (nlabels, nbatches)
-        """
-        # reverse the gradient of the model
-        reversed_embed = base_model.gradient_reversal(cell_embed, self.model_config.lamb_reverse)
-        batch_pred = self.discriminator(reversed_embed)
+    # def calc_discriminator(self, cell_embed: torch.Tensor, label_batch: torch.Tensor | None = None):
+    #     """
+    #     cell_embed: the embedding of cells, returned from the foundation model
+    #     label_batch: the binary matrix showing the batches where each label exist, of shape (nlabels, nbatches)
+    #     """
+    #     # reverse the gradient of the model
+    #     reversed_embed = base_model.gradient_reversal(cell_embed, self.model_config.lamb_reverse)
+    #     batch_pred = self.discriminator(reversed_embed)
 
-        if label_batch is not None:
-            batch_pred = batch_pred.masked_fill(~label_batch, -float('inf'))
+    #     if label_batch is not None:
+    #         batch_pred = batch_pred.masked_fill(~label_batch, -float('inf'))
 
-        return batch_pred
+    #     return batch_pred
 
