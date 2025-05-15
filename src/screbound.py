@@ -98,12 +98,17 @@ class ConditionalPredictor(nn.Module):
         latent_dim = 512
         self.deep_inj = deep_inj
         self.nb_head = nb_head
+
+        self.layernorm_input = nn.LayerNorm(input_dim)
+        # already layernormed
+        # self.layernorm_cond = nn.LayerNorm(condition_dim)
+
         self.layers = nn.ModuleList()
         self.layers.append(base_model.full_block(input_dim + condition_dim, latent_dim, p_drop = dropout))
 
         for layer in range(1, n_layers - 1):
             self.layers.append(base_model.full_block(latent_dim + condition_dim if self.deep_inj else latent_dim, latent_dim, p_drop = dropout))
-
+            
         if not self.nb_head:
             self.layers.append(nn.Linear(latent_dim + condition_dim if self.deep_inj else latent_dim, output_dim))
             # predict non-negative values
@@ -111,12 +116,18 @@ class ConditionalPredictor(nn.Module):
             self.activation = nn.Softplus()
 
         else:
-            self.mean_head = nn.Sequential(nn.Linear(latent_dim, output_dim),
+            # self.mean_head = nn.Sequential(nn.Linear(latent_dim, output_dim),
+            #                                nn.Softmax(dim = -1))
+            
+            # self.dispersion_head = nn.Sequential(nn.Linear(latent_dim, output_dim))
+
+            self.mean_head = nn.Sequential(nn.Linear(latent_dim + condition_dim, output_dim),
                                            nn.Softmax(dim = -1))
             
-            self.dispersion_head = nn.Sequential(nn.Linear(latent_dim, output_dim))
+            self.dispersion_head = nn.Sequential(nn.Linear(latent_dim + condition_dim, output_dim))
 
     def forward(self, x, cond):
+        x = self.layernorm_input(x)
         for idx, layer in enumerate(self.layers):
             if (not self.deep_inj) and (idx > 0):
                 x = layer(x)
@@ -131,8 +142,10 @@ class ConditionalPredictor(nn.Module):
             return x
         
         else:
-            x_mean = self.mean_head(x)
-            x_disp = torch.exp(self.dispersion_head(x))
+            # x_mean = self.mean_head(x)
+            # x_disp = torch.exp(self.dispersion_head(x))
+            x_mean = self.mean_head(torch.cat([x, cond], dim = 1))
+            x_disp = torch.exp(self.dispersion_head(torch.cat([x, cond], dim = 1)))
             return {"mean": x_mean, "disp": x_disp}
         
 
@@ -157,17 +170,18 @@ class TransformerModel(nn.Module):
         self.device = device
 
         if self.model_config.batch_enc is not None:
+            self.cond_embed = self.model_config.d_output
             if self.model_config.batch_enc == "cat_pool":
                 # categorical version
-                self.batch_encoder = base_model.batch_encoder_catpool(n_cat_list = batch_dict["n_cat_list"], n_embed = self.model_config.d_embed)
+                self.batch_encoder = base_model.batch_encoder_catpool(n_cat_list = batch_dict["n_cat_list"], n_embed = self.cond_embed)
 
             elif self.model_config.batch_enc == "cat_concat":
                 # categorical version
-                self.batch_encoder = base_model.batch_encoder_cat(n_cat_list = batch_dict["n_cat_list"], n_embed = self.model_config.d_embed, n_output = self.model_config.d_embed, p_drop = 0.0)
+                self.batch_encoder = base_model.batch_encoder_cat(n_cat_list = batch_dict["n_cat_list"], n_embed = self.cond_embed, n_output = self.cond_embed, p_drop = 0.0)
 
-            self.cond_embed = 64
+            
             # self.cond_embed = self.model_config.d_output    
-            self.batch_proj = nn.Sequential(nn.Linear(self.model_config.d_embed, self.cond_embed),
+            self.batch_proj = nn.Sequential(nn.Linear(self.cond_embed, self.cond_embed),
                                             nn.GELU(),
                                             nn.LayerNorm(self.cond_embed))
         else:

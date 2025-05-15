@@ -41,6 +41,10 @@ class MaskScheduler:
         prob = self.initial_prob + progress * (self.final_prob - self.initial_prob)
 
         return prob
+    
+    def get_prob_rand(self):
+        prob = np.random.uniform(self.initial_prob, self.final_prob)
+        return prob
 
 def save_checkpoint(epoch, step, model, optimizer, scheduler, loss, path, multi_gpus = True):
     if multi_gpus:
@@ -461,7 +465,7 @@ def train_multigpus(model, train_config, optimizer, scheduler, writer):
                 # update the freezing status, after finish the first epoch
                 if (model.module.model_config.mlm_type != "meta") and (step == int(0.1 * len(train_loader) * train_config["num_partitions"])):
                     print(f"unfreeze the model at step {step:d}")
-                    model.module.freeze_fm_gradient(freeze_trans = False, freeze_predictor = False, freeze_batchenc = False, freeze_compression = False)
+                    model.module.freeze_fm_gradient(freeze_trans = False, freeze_batchenc = False, freeze_compression = False)
 
                 # update the mask_prob 
                 if model.module.model_config.dynamic_maskprob:
@@ -634,7 +638,7 @@ def train_singlegpu(model, train_config, optimizer, scheduler, writer):
                 # update the freezing status, after finish the first epoch
                 if (model.model_config.mlm_type != "meta") and (step == int(0.1 * len(train_loader) * train_config["num_partitions"])):
                     print(f"unfreeze the model at step {step:d}")
-                    model.freeze_fm_gradient(freeze_trans = False, freeze_predictor = False, freeze_batchenc = False, freeze_compression = False)
+                    model.freeze_fm_gradient(freeze_trans = False, freeze_batchenc = False, freeze_compression = False)
 
                 # update the mask_prob 
                 if model.model_config.dynamic_maskprob:
