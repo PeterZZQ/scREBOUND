@@ -4,6 +4,49 @@ from torch import nn as nn
 import torch.nn.functional as F
 import collections
 from torch.amp import autocast
+
+from torch.autograd import Function
+# gradient reversal, necessary for discriminator training
+class GradientReversalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, alpha):
+        ctx.alpha = alpha
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output.neg() * ctx.alpha, None
+
+def gradient_reversal(x, alpha=1.0):
+    return GradientReversalFunction.apply(x, alpha)
+
+
+class MinMaxNormalization(nn.Module):
+    def __init__(self, eps: float = 1e-6):
+        super(MinMaxNormalization, self).__init__()
+        self.eps = eps  # A small value to avoid division by zero
+
+    def forward(self, x):
+        # Compute the min and max along the specified dimensions
+        x_max = x.max(dim=1, keepdim=True)[0]
+        # x_min is always 0
+        
+        # Normalize to [0, 1]
+        x_normalized = x / (x_max + self.eps)
+        return x_normalized
+
+class LogNormalization(nn.Module):
+    def __init__(self, eps: float = 1e-6, scale_factor: float = 10e4):
+        super(LogNormalization, self).__init__()
+        self.eps = eps
+        self.scale_factor = scale_factor
+    def forward(self, x, norm_1: bool):
+        x = x/(x.sum(dim = 1, keepdim = True) + self.eps) * self.scale_factor
+        x = torch.log1p(x)
+        if norm_1:
+            x = x/(x.sum(1, keepdim = True) + self.eps)
+        return x
+    
     
 def identity(x):
     return x
@@ -21,7 +64,6 @@ def full_block(in_features, out_features, p_drop=0.1):
         nn.GELU(),
         nn.Dropout(p=p_drop),
     )
-
 
 def log_nb_positive(x, mu, theta, eps=1e-8):
     """
@@ -44,237 +86,7 @@ def log_nb_positive(x, mu, theta, eps=1e-8):
         torch.lgamma(theta) - \
         torch.lgamma(x + 1)
 
-    return torch.sum(res, dim=-1)
-
-class FCLayers(nn.Module):
-    """
-    A helper class to build fully-connected layers for a neural network.
-
-    Parameters
-    ----------
-    n_in
-        The dimensionality of the input
-    n_out
-        The dimensionality of the output
-    n_cat_list
-        A list containing, for each category of interest,
-        the number of categories. Each category will be
-        included using a one-hot encoding.
-    n_layers
-        The number of fully-connected hidden layers
-    n_hidden
-        The number of nodes per hidden layer
-    dropout_rate
-        Dropout rate to apply to each of the hidden layers
-    use_batch_norm
-        Whether to have `BatchNorm` layers or not
-    use_layer_norm
-        Whether to have `LayerNorm` layers or not
-    use_activation
-        Whether to have layer activation or not
-    bias
-        Whether to learn bias in linear layers or not
-    inject_covariates
-        Whether to inject covariates in each layer, or just the first (default).
-    activation_fn
-        Which activation function to use
-    """
-
-    def __init__(
-        self,
-        n_in: int,
-        n_out: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = False,
-        use_activation: bool = False,
-        bias: bool = True,
-        inject_covariates: bool = False,
-        activation_fn: nn.Module = nn.GELU,
-        dtype: torch.dtype = torch.float32
-    ):
-        super().__init__()
-        self.inject_covariates = inject_covariates
-        layers_dim = [n_in] + (n_layers - 1) * [n_hidden] + [n_out]
-
-        if n_cat_list is not None:
-            # n_cat = 1 will be ignored
-            self.n_cat_list = [n_cat if n_cat > 1 else 0 for n_cat in n_cat_list]
-        else:
-            self.n_cat_list = []
-        
-        # self.n_cat_list = [n_batches]
-        # cat_dim = n_batches
-        cat_dim = sum(self.n_cat_list)
-        self.fc_layers = nn.Sequential(
-            collections.OrderedDict(
-                [
-                    (
-                        "Layer {}".format(i),
-                        nn.Sequential(
-                            nn.Linear(
-                                # inject cat_dim into the first layer if deeply_inject_covariates is False
-                                # to all dimensions if the deeply_inject_covariates is True
-                                n_in + cat_dim * self.inject_into_layer(i),
-                                n_out,
-                                bias=bias,
-                            ),
-                            # non-default params come from defaults in original Tensorflow implementation
-                            nn.BatchNorm1d(n_out, momentum=0.01, eps=0.001)
-                            if use_batch_norm
-                            else None,
-                            nn.LayerNorm(n_out, elementwise_affine=False)
-                            if use_layer_norm
-                            else None,
-                            activation_fn() if use_activation else None,
-                            nn.Dropout(p=dropout_rate) if dropout_rate > 0 else None,
-                        ),
-                    )
-                    for i, (n_in, n_out) in enumerate(
-                        zip(layers_dim[:-1], layers_dim[1:])
-                    )
-                ]
-            )
-        )
-
-        self.dtype = dtype
-
-    def inject_into_layer(self, layer_num) -> bool:
-        """Helper to determine if covariates should be injected."""
-        user_cond = layer_num == 0 or (layer_num > 0 and self.inject_covariates)
-        return user_cond
-
-    def set_online_update_hooks(self, hook_first_layer=True):
-        self.hooks = []
-
-        def _hook_fn_weight(grad):
-            categorical_dims = sum(self.n_cat_list)
-            new_grad = torch.zeros_like(grad)
-            if categorical_dims > 0:
-                new_grad[:, -categorical_dims:] = grad[:, -categorical_dims:]
-            return new_grad
-
-        def _hook_fn_zero_out(grad):
-            return grad * 0
-
-        for i, layers in enumerate(self.fc_layers):
-            for layer in layers:
-                if i == 0 and not hook_first_layer:
-                    continue
-                if isinstance(layer, nn.Linear):
-                    if self.inject_into_layer(i):
-                        w = layer.weight.register_hook(_hook_fn_weight)
-                    else:
-                        w = layer.weight.register_hook(_hook_fn_zero_out)
-                    self.hooks.append(w)
-                    b = layer.bias.register_hook(_hook_fn_zero_out)
-                    self.hooks.append(b)
-
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        """
-        Forward computation on ``x``.
-
-        Parameters
-        ----------
-        x
-            tensor of values with shape ``(n_in,)``
-        cat_list
-            list of category membership(s) for this sample
-        x: torch.Tensor
-
-        Returns
-        -------
-        py:class:`torch.Tensor`
-            tensor of shape ``(n_out,)``
-
-        """
-        one_hot_cat_list = []  # for generality in this list many indices useless.
-
-        if len(self.n_cat_list) > len(cat_list):
-            raise ValueError(
-                "nb. categorical args provided doesn't match init. params."
-            )
-        # self.n_cat_list = [n_batches], cat is a int indicating the current batch
-        for n_cat, cat in zip(self.n_cat_list, cat_list):
-            if n_cat and cat is None:
-                raise ValueError("cat not provided while n_cat != 0 in init. params.")
-            if n_cat > 1:  # n_cat = 1 will be ignored - no additional information
-                if cat.size(1) != n_cat:
-                    one_hot_cat = one_hot(cat, n_cat, dtype = self.dtype)
-                else:
-                    one_hot_cat = cat  # cat has already been one_hot encoded
-                one_hot_cat_list += [one_hot_cat]
-        for i, layers in enumerate(self.fc_layers):
-            for layer in layers:
-                if layer is not None:
-                    if isinstance(layer, nn.BatchNorm1d):
-                        if x.dim() == 3:
-                            x = torch.cat(
-                                [(layer(slice_x)).unsqueeze(0) for slice_x in x], dim=0
-                            )
-                        else:
-                            x = layer(x)
-                    else:
-                        if isinstance(layer, nn.Linear) and self.inject_into_layer(i):
-                            if x.dim() == 3:
-                                one_hot_cat_list_layer = [
-                                    o.unsqueeze(0).expand(
-                                        (x.size(0), o.size(0), o.size(1))
-                                    )
-                                    for o in one_hot_cat_list
-                                ]
-                            else:
-                                one_hot_cat_list_layer = one_hot_cat_list
-                            x = torch.cat((x, *one_hot_cat_list_layer), dim=-1)
-                        x = layer(x)
-        return x   
-    
-
-class decoder(nn.Module):
-    def __init__(
-        self,
-        n_input: int,
-        n_output: int,
-        n_cat_list: Iterable[int] = None,
-        n_layers: int = 1,
-        n_hidden: int = 128,
-        dropout_rate: float = 0.1,
-        inject_covariates: bool = False,
-        use_batch_norm: bool = False,
-        use_layer_norm: bool = True,
-        dtype: torch.dtype = torch.float32
-    ):
-        super().__init__()
-        self.fc = FCLayers(
-            n_in=n_input,
-            n_out=n_hidden,
-            n_cat_list=n_cat_list,
-            n_layers=n_layers - 1,
-            n_hidden=n_hidden,
-            dropout_rate=dropout_rate,
-            inject_covariates=inject_covariates,
-            use_batch_norm=use_batch_norm,
-            use_layer_norm=use_layer_norm,
-            use_activation=True,
-            bias=True,
-            activation_fn=nn.GELU,
-            dtype = dtype
-        )
-        self.linear_out = nn.Linear(n_hidden, n_output)
-        # NOTE: the expression value is non-negative, but doesn't normalize by 1
-        # use softplus to constrain the non-negativity
-        # self.output_act = nn.Softmax(dim=-1)
-        # self.output_act = nn.Softplus()
-    
-    def forward(self, x: torch.Tensor, *cat_list: int):
-        x = self.fc(x, *cat_list)
-        # y = self.output_act(self.linear_out(x))
-        y = self.linear_out(x)
-        return y
-
+    return res # torch.sum(res, dim=-1)
 
 class TransformerLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, activation: str = "relu"):
@@ -368,132 +180,190 @@ def fourier_positional_encoding(x: torch.Tensor, embedding_dim: int):
 # 2. the categorical variables: sequencing technologies, donor conditions, etc
 # NOTE: issue, is the categorical values independent or related (independent use nn.Embed), most factors have independent categorical effect on batch effect
 
-
-class encoder_batchfactor(nn.Module):
-
-    def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
+class batch_encoder_mlp(nn.Module):
+    def __init__(self, n_feat, n_embed, p_drop = 0.1):
         super().__init__()
+        self.n_feat = n_feat
+        self.n_embed = n_embed
+        self.enc_cont = nn.Sequential(full_block(in_features = self.n_feat, out_features = self.n_embed, p_drop = p_drop), 
+                                      full_block(in_features = self.n_embed, out_features = self.n_embed, p_drop = p_drop))    
+    
+    def forward(self, batch_factors):
+        batch_embed = self.enc_cont(batch_factors)
+        weight = torch.ones((self.n_feat,)).to(batch_factors.device)
+        return batch_embed, weight
 
-        self.n_cont_feat = n_cont_feat
+
+class batch_encoder_cont(nn.Module):
+    def __init__(self, n_feat, n_embed, p_drop = 0.1):
+        super().__init__()
+        self.n_feat = n_feat
+        self.n_latent = 32
+        self.n_embed = n_embed
+        for id in range(self.n_feat):
+            self.enc_cont[str(id)] = nn.Sequential(full_block(in_features = self.n_latent, out_features = self.n_latent, p_drop = p_drop), 
+                                                   nn.Linear(in_features = self.n_latent, out_features = self.n_embed))    
+
+        # parameter weight
+        self.weight = nn.Parameter(torch.randn((self.n_feat)))
+        self.softmax = nn.Softmax()
+    
+    def forward(self, batch_factors):
+        weight = self.softmax(self.weight)
+        batch_embed = torch.zeros((batch_factors.shape[0], self.n_embed), device = batch_factors.device)
+
+        for id in range(self.n_feat):
+            batch_embed += weight[id] * self.enc_cont[str(id)](fourier_positional_encoding(batch_factors[:, [id]], embedding_dim = self.n_latent))
+        return batch_embed, weight
+
+
+class batch_encoder_cat(nn.Module):
+    def __init__(self, n_cat_list, n_embed, n_output, p_drop):
+        super().__init__()
         self.n_cat_feat = len(n_cat_list)
         self.n_embed = n_embed
-        
-        # NOTE: hard to bin the value directly, don't know the largest value??
-        self.enc_cont = nn.ModuleDict({})
-        for id in range(self.n_cont_feat):
-            self.enc_cont[str(id)] = nn.Sequential(full_block(in_features = 1, out_features = 64, p_drop = p_drop), 
-                                              nn.Linear(in_features = 64, out_features = self.n_embed))
+        self.n_output = n_output
+        self.p_drop = p_drop
+
+        self.enc_cat = nn.ModuleDict({})
+        for id in range(self.n_cat_feat):
+            self.enc_cat[str(id)] = nn.Embedding(num_embeddings = n_cat_list[id], embedding_dim = self.n_embed)   
+             
+        self.enc_proj = full_block(self.n_cat_feat * self.n_embed, self.n_output, p_drop = self.p_drop)
+
+    def forward(self, batch_factors):
+        batch_embed = []
+        for id in range(self.n_cat_feat):
+            x_cat = batch_factors[:, [id]].long()
+            embed = self.enc_cat[str(id)](x_cat).squeeze()
+            batch_embed.append(embed) 
+        batch_embed = torch.hstack(batch_embed)
+        # batch_embed = nn.functional.normalize(self.enc_proj(batch_embed))
+        batch_embed = self.enc_proj(batch_embed)
+
+        weights = torch.ones((self.n_cat_feat,)).to(batch_embed.device)
+        return batch_embed, weights
+
+
+# basically copying the encoder_batchfactor and remove redundancy
+class batch_encoder_catpool(nn.Module):
+    def __init__(self, n_cat_list, n_embed):
+        super().__init__()
+        self.n_cat_feat = len(n_cat_list)
+        self.n_embed = n_embed
 
         self.enc_cat = nn.ModuleDict({})
         for id in range(self.n_cat_feat):
             self.enc_cat[str(id)] = nn.Embedding(num_embeddings = n_cat_list[id], embedding_dim = self.n_embed)            
     
+        self.enc_proj = full_block(self.n_cat_feat * self.n_embed, self.n_output, p_drop = self.p_drop)
+
         # parameter weight
-        self.weight = nn.Parameter(torch.randn((self.n_cont_feat + self.n_cat_feat)))
+        self.weight = nn.Parameter(torch.randn((self.n_cat_feat)))
         self.softmax = nn.Softmax()
-
-    def forward(self, batch_factors_cont, batch_factors_cat):
-        # assert batch_factors_cont.shape[1] == self.n_cont_feat
-        # assert batch_factors_cat.shape[1] == self.n_cat_feat
-
-        # softmax the weight values
+    
+    def forward(self, batch_factors):
         weight = self.softmax(self.weight)
+        batch_embed = torch.zeros((batch_factors.shape[0], self.n_embed), device = batch_factors.device)
 
-        # continuous values
-        batch_embed = torch.zeros((batch_factors_cat.shape[0], self.n_embed), device = batch_factors_cat.device)
-        for id in range(self.n_cont_feat):
-            batch_embed += weight[id] * self.enc_cont[str(id)](batch_factors_cont[:, [id]])
-        
-        # categorical values
         for id in range(self.n_cat_feat):
-            x_cat = batch_factors_cat[:, [id]].long()
-
-            # with 0 assignment for -1
-            mask = (x_cat == -1).squeeze()
-            x_cat[mask] = 0
+            x_cat = batch_factors[:, [id]].long()
+            # # with 0 assignment for -1
+            # mask = (x_cat == -1).squeeze()
+            # x_cat[mask] = 0
             embed = self.enc_cat[str(id)](x_cat).squeeze()
-            embed[mask] = 0.0  
+            # embed[mask] = 0.0  
+            batch_embed += weight[id] * embed
 
-            batch_embed += weight[id + self.n_cont_feat] * embed
-
-        batch_embed = nn.functional.normalize(batch_embed, dim = 1)
+        batch_embed = self.enc_proj(batch_embed)
 
         return batch_embed, weight
+
+# class encoder_batchfactor(nn.Module):
+
+#     def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
+#         super().__init__()
+
+#         self.n_cont_feat = n_cont_feat
+#         self.n_cat_feat = len(n_cat_list)
+#         self.n_embed = n_embed
+        
+#         # NOTE: hard to bin the value directly, don't know the largest value??
+#         self.enc_cont = nn.ModuleDict({})
+#         for id in range(self.n_cont_feat):
+#             self.enc_cont[str(id)] = nn.Sequential(full_block(in_features = 1, out_features = 64, p_drop = p_drop), 
+#                                               nn.Linear(in_features = 64, out_features = self.n_embed))
+
+#         self.enc_cat = nn.ModuleDict({})
+#         for id in range(self.n_cat_feat):
+#             self.enc_cat[str(id)] = nn.Embedding(num_embeddings = n_cat_list[id], embedding_dim = self.n_embed)            
+    
+#         # parameter weight
+#         self.weight = nn.Parameter(torch.randn((self.n_cont_feat + self.n_cat_feat)))
+#         self.softmax = nn.Softmax()
+
+#     def forward(self, batch_factors_cont, batch_factors_cat):
+#         # assert batch_factors_cont.shape[1] == self.n_cont_feat
+#         # assert batch_factors_cat.shape[1] == self.n_cat_feat
+
+#         # softmax the weight values
+#         weight = self.softmax(self.weight)
+
+#         # continuous values
+#         batch_embed = torch.zeros((batch_factors_cat.shape[0], self.n_embed), device = batch_factors_cat.device)
+#         for id in range(self.n_cont_feat):
+#             batch_embed += weight[id] * self.enc_cont[str(id)](batch_factors_cont[:, [id]])
+        
+#         # categorical values
+#         for id in range(self.n_cat_feat):
+#             x_cat = batch_factors_cat[:, [id]].long()
+
+#             # with 0 assignment for -1
+#             mask = (x_cat == -1).squeeze()
+#             x_cat[mask] = 0
+#             embed = self.enc_cat[str(id)](x_cat).squeeze()
+#             embed[mask] = 0.0  
+
+#             batch_embed += weight[id + self.n_cont_feat] * embed
+
+#         batch_embed = nn.functional.normalize(batch_embed, dim = 1)
+
+#         return batch_embed, weight
     
 
-class decoder_batchfactor(nn.Module):
-    def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
-        super().__init__()
+# class decoder_batchfactor(nn.Module):
+#     def __init__(self, n_cont_feat, n_cat_list, n_embed, p_drop = 0.1):
+#         super().__init__()
 
-        self.n_cont_feat = n_cont_feat
-        self.n_cat_feat = len(n_cat_list)
-        self.n_embed = n_embed
+#         self.n_cont_feat = n_cont_feat
+#         self.n_cat_feat = len(n_cat_list)
+#         self.n_embed = n_embed
 
-        self.dec_cont = nn.ModuleDict({})
-        for id in range(self.n_cont_feat):
-            self.dec_cont[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop), 
-                                              nn.Linear(in_features = 64, out_features = 1))
+#         self.dec_cont = nn.ModuleDict({})
+#         for id in range(self.n_cont_feat):
+#             self.dec_cont[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop), 
+#                                               nn.Linear(in_features = 64, out_features = 1))
 
-        self.dec_cat = nn.ModuleDict({})
-        for id in range(self.n_cat_feat):
-            self.dec_cat[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop),
-                                             nn.Linear(in_features = 64, out_features = n_cat_list[id]))
-                                            #  nn.Softmax())
+#         self.dec_cat = nn.ModuleDict({})
+#         for id in range(self.n_cat_feat):
+#             self.dec_cat[str(id)] = nn.Sequential(full_block(in_features = self.n_embed, out_features = 64, p_drop = p_drop),
+#                                              nn.Linear(in_features = 64, out_features = n_cat_list[id]))
+#                                             #  nn.Softmax())
             
 
-    def forward(self, batch_embed):
-        assert batch_embed.shape[1] == self.n_embed
+#     def forward(self, batch_embed):
+#         assert batch_embed.shape[1] == self.n_embed
 
-        batch_factors_cont = {}
-        batch_factors_cat = {}
-        for id in range(self.n_cont_feat):
-            batch_factors_cont[id] = self.dec_cont[str(id)](batch_embed)
-        for id in range(self.n_cat_feat):
-            batch_factors_cat[id] = self.dec_cat[str(id)](batch_embed)
+#         batch_factors_cont = {}
+#         batch_factors_cat = {}
+#         for id in range(self.n_cont_feat):
+#             batch_factors_cont[id] = self.dec_cont[str(id)](batch_embed)
+#         for id in range(self.n_cat_feat):
+#             batch_factors_cat[id] = self.dec_cat[str(id)](batch_embed)
 
-        return batch_factors_cont, batch_factors_cat
-
-from torch.autograd import Function
-# gradient reversal, necessary for discriminator training
-class GradientReversalFunction(Function):
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.alpha = alpha
-        return x.view_as(x)
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        return grad_output.neg() * ctx.alpha, None
-
-def gradient_reversal(x, alpha=1.0):
-    return GradientReversalFunction.apply(x, alpha)
+#         return batch_factors_cont, batch_factors_cat
 
 
-class MinMaxNormalization(nn.Module):
-    def __init__(self, eps: float = 1e-6):
-        super(MinMaxNormalization, self).__init__()
-        self.eps = eps  # A small value to avoid division by zero
-
-    def forward(self, x):
-        # Compute the min and max along the specified dimensions
-        x_max = x.max(dim=1, keepdim=True)[0]
-        # x_min is always 0
-        
-        # Normalize to [0, 1]
-        x_normalized = x / (x_max + self.eps)
-        return x_normalized
-
-class LogNormalization(nn.Module):
-    def __init__(self, eps: float = 1e-6, scale_factor: float = 10e4):
-        super(LogNormalization, self).__init__()
-        self.eps = eps
-        self.scale_factor = scale_factor
-    def forward(self, x, norm_1: bool):
-        x = x/(x.sum(dim = 1, keepdim = True) + self.eps) * self.scale_factor
-        x = torch.log1p(x)
-        if norm_1:
-            x = x/(x.sum(1, keepdim = True) + self.eps)
-        return x
 
 
 

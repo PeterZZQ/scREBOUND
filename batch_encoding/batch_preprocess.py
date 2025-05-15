@@ -7,7 +7,10 @@ from tqdm import tqdm
 import scipy.sparse as sp
 from multiprocessing import Pool
 
-import batch_encoding.batch_encode as batch_encode
+import sys
+sys.path.append("/net/csefiles/xzhanglab/zzhang834/LLM_KD/src/")
+
+import batch_encode
 
 # In[]
 # ---------------------------------------------------------------------------------------------------------------------------------------
@@ -15,43 +18,56 @@ import batch_encoding.batch_encode as batch_encode
 # Obtain batch information, construct batch features
 #
 # ---------------------------------------------------------------------------------------------------------------------------------------
-hm_housekeeping = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/dataset/MostStable.csv", sep = ";")
-n_mgene = 256
-gene_embed_dict = torch.load(f"/net/csefiles/xzhanglab/zzhang834/hs_download/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
+# hm_housekeeping = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/dataset/MostStable.csv", sep = ";")
+# n_mgene = 256
+# gene_embed_dict = torch.load(f"/net/csefiles/xzhanglab/zzhang834/hs_download/meta_data/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
 
 # # TODO: the hk and mito genes are selected from only the protein embedding genes, there are more genes in the original data
 # hk_gene_name = np.intersect1d(hm_housekeeping["Gene name"].values.squeeze(), 
 #                               gene_embed_dict["labels"]["feature_name"].values.squeeze())
 # mito_gene_name = [gene for gene in gene_embed_dict["labels"]["feature_name"].values.squeeze() if gene.startswith("MT-")]
 
-# NOTE: human hk/mito already extracted and hard-coded in the batch_encode file
-hk_gene_name = batch_encode.hk_gene_name
-mito_gene_name = batch_encode.mito_gene_name
+# # ribosomal genes
+# ribo_gene_df = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/batch_encoding/gene_ribosomal_go0005840.csv", index_col = 0)
+# ribo_gene_name = [x for x in ribo_gene_df["external_gene_name"].values.squeeze() if not pd.isna(x)]
+# ribo_gene_name = np.intersect1d(ribo_gene_name, full_gene)
+# # mainly MRPL, MRPS, RPL, RPS, first two are nuclear mito-ribosomal genes, droped
+# # there are 91 ribosomal genes, further filter-out the low-detection genes or calculate average
+# ribo_gene_name = [x for x in ribo_gene_name if (x[:3] == "RPL")|(x[:3] == "RPS")]
+
+# # stress-response gene
+# stress_gene_df = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/batch_encoding/gene_stress_go0006950.csv", index_col = 0)
+# stress_gene_name = [x for x in stress_gene_df["external_gene_name"].values.squeeze() if not pd.isna(x)]
+# # there are 28 genes, further filter-out the low-dection genes or calculate average
+# stress_gene_name = [x for x in np.intersect1d(stress_gene_name, full_gene)]
+
+# In[]
+n_mgene = 256
+gene_embed_dict = torch.load(f"/net/csefiles/xzhanglab/zzhang834/hs_download/meta_data/gene_embed_meta{n_mgene}_gpool.pt", weights_only = False)
 full_gene = gene_embed_dict["labels"]["feature_name"].values
 
-# ribosomal genes
-ribo_gene_df = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/batch_encoding/gene_ribosomal_go0005840.csv", index_col = 0)
-ribo_gene_name = [x for x in ribo_gene_df["external_gene_name"].values.squeeze() if not pd.isna(x)]
-ribo_gene_name = np.intersect1d(ribo_gene_name, full_gene)
-# mainly MRPL, MRPS, RPL, RPS, first two are nuclear mito-ribosomal genes, droped
-# there are 91 ribosomal genes, further filter-out the low-detection genes or calculate average
-ribo_gene_name = [x for x in ribo_gene_name if (x[:3] == "RPL")|(x[:3] == "RPS")]
-
-# stress-response gene
-stress_gene_df = pd.read_csv("/net/csefiles/xzhanglab/zzhang834/LLM_KD/batch_encoding/gene_stress_go0006950.csv", index_col = 0)
-stress_gene_name = [x for x in stress_gene_df["external_gene_name"].values.squeeze() if not pd.isna(x)]
-# there are 28 genes, further filter-out the low-dection genes or calculate average
-stress_gene_name = [x for x in np.intersect1d(stress_gene_name, full_gene)]
-
+# NOTE: human hk/mito already extracted and hard-coded in the batch_encode file
+# selected ribo gene and stress gene are already hard-coded in the batch_encode file
+# hk_gene_name = batch_encode.hk_gene_name
+# mito_gene_name = batch_encode.mito_gene_name
+# ribo_gene_name = batch_encode.ribo_gene_name
+# stress_gene_name = batch_encode.stress_gene_name
+# include all genes above, hard-coded
+batch_gene_name = batch_encode.batch_gene_name
 
 # In[]
 # read in the batch_meta_information
 meta_cells = []
-# data_dir = "/data/zzhang834/hs_download/permuted/"
+# Old dataset
 data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/permuted/"
+res_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/meta_data/"
+# New dataset
+# data_dir = "/data/zzhang834/hs_healthy_2025_01_30/permuted/"
+# res_dir = "/data/zzhang834/hs_healthy_2025_01_30/meta_data/"
+
 sizes = np.loadtxt(data_dir + "sizes.txt")
 chunk_sizes = []
-for partition_idx in range(0, len(sizes)):
+for partition_idx in tqdm(range(0, len(sizes))):
     meta_cells_chunk = pd.read_parquet(os.path.join(data_dir, f"obs_{partition_idx}.parquet"))
     chunk_sizes.append(meta_cells_chunk.shape[0])
     meta_cells.append(meta_cells_chunk)
@@ -80,6 +96,8 @@ batch_id3, batch_code3 = pd.factorize(meta_cells["batch_level2"].values, sort = 
 meta_cells["batch_level2_id"] = batch_id3
 batch_code = {"batch_level0": batch_code1, "batch_level1": batch_code2, "batch_level2": batch_code3}
 
+print(f"number of batches: batch_level0: {len(batch_code1)}, batch_level1: {len(batch_code2)}, batch_level2: {len(batch_code3)}")
+
 # ptr = 0
 # for cum_idx, chunk_size in enumerate(chunk_sizes):
 #     meta_cells_chunk = meta_cells.iloc[ptr:(chunk_size + ptr), :]
@@ -91,92 +109,6 @@ batch_code = {"batch_level0": batch_code1, "batch_level1": batch_code2, "batch_l
 # Each dataset has both batch & condition,
 # batch is technical factors including technology, suspension type, etc that are not important for biological information of study
 # condition also exist at the same time (sex, developmental stage, tissue type, etc), the model should be generalizable towards all conditions
-
-def _calc_stats_batch_features(batch_id):
-    print(f"process batch {batch_id}...")
-    meta_cell_batch = meta_cells.loc[meta_cells[batch_name] == batch_id, :]
-
-    # construct batch_data
-    batch_data = pd.DataFrame(index = [batch_id], columns = ["assay", "suspension_type", "n_measures", "libsize", "nnz", "raw_mean_nnz", "prop_mito"] + [x for x in hk_gene_name] + ["num_cells"])
-    # calculate the number of cells
-    batch_data.loc[batch_id, "num_cells"] = meta_cell_batch.shape[0]
-
-    # categorical features
-    assay_info = np.unique(meta_cell_batch["assay"].values)
-    suspension_type = np.unique(meta_cell_batch["suspension_type"].values)
-    # developmental_stage = np.unique(meta_cell_batch["development_stage"].values)
-    # sex = np.unique(meta_cell_batch["sex"].values)
-    # tissue = np.unique(meta_cell_batch["tissue"].values)
-    # tissue_general = np.unique(meta_cell_batch["tissue_general"].values)
-    assert len(assay_info) == 1
-    assert len(suspension_type) == 1
-
-    batch_data.loc[batch_id, "assay"] = assay_info[0]
-    batch_data.loc[batch_id, "suspension_type"] = suspension_type[0]
-
-    # mean library size
-    batch_data.loc[batch_id, "libsize"] = meta_cell_batch["raw_sum"].values.mean()
-    n_totalgenes = np.unique(meta_cell_batch["n_measured_vars"].values)
-    assert len(n_totalgenes) == 1
-    # number of the measured genes
-    batch_data.loc[batch_id, "n_measures"] = n_totalgenes[0]
-    # proportion of non-zero expression gene, number of non-zero entries normalized by the total number of genes
-    batch_data.loc[batch_id, "nnz"] = meta_cell_batch["nnz"].values.mean()/n_totalgenes
-    # mean expression of non-zero expression gene
-    batch_data.loc[batch_id, "raw_mean_nnz"] = meta_cell_batch["raw_mean_nnz"].values.mean()
-    return batch_data
-
-
-def _calc_expr_batch_features(partition_idx):
-    print(f"processing partition {partition_idx}.")
-
-    full_list = gene_embed_dict["labels"]["feature_name"].values
-    hk_gene_position = np.array([np.where(full_list == x)[0][0] for x in hk_gene_name])
-    mito_gene_position = np.array([np.where(full_list == x)[0][0] for x in mito_gene_name])
-    
-    expr_batch_norm = pd.DataFrame(data = 0.0, index = batch_code[batch_name], columns = hk_gene_name)
-    prop_mito = pd.DataFrame(data = 0.0, index = batch_code[batch_name], columns = ["prop_mito"])
-
-    # extract libsize for normalization, more accurate: calculate the libsize from the data directly    
-    meta_cells_chunk = pd.read_parquet(os.path.join(data_dir, f"obs_{partition_idx}_batchcode.parquet"))
-    libsize = meta_cells_chunk["raw_sum"].values.reshape(-1)
-    # NOTE: maybe calculate libsize, nnz, raw_mean_nnz all directly from data
-
-
-    print("Extract data matrix...")
-    # read in the raw count matrix for the corresponding partition
-    data_chunk = np.memmap(os.path.join(data_dir, f"counts_data_{partition_idx}.npz"), dtype = 'float32', mode = 'r', shape = (int(sizes[partition_idx, 0]),))
-    indices_chunk = np.memmap(os.path.join(data_dir, f"counts_indices_{partition_idx}.npz"), dtype = 'int16', mode = 'r', shape = (int(sizes[partition_idx, 1]),))
-    indptr_chunk = np.memmap(os.path.join(data_dir, f"counts_indptr_{partition_idx}.npz"), dtype = 'uint64', mode = 'r', shape = (int(sizes[partition_idx, 2]),))
-
-    counts_chunk = sp.csr_matrix((data_chunk, indices_chunk, indptr_chunk), shape=(meta_cells_chunk.shape[0], len(full_list)))
-
-
-    counts_chunk = counts_chunk[:, np.hstack([hk_gene_position, mito_gene_position])]
-    # raw count of hk-gene within each cell
-    counts_chunk_hk = counts_chunk[:, :len(hk_gene_position)]
-    # total mito raw count within each cell
-    counts_chunk_mito = counts_chunk[:, len(hk_gene_position):].toarray().sum(axis = 1)
-    del counts_chunk
-    print("Done. Calculate feature for each batch...")
-
-    for uniq_batch in batch_code[batch_name]:
-        batch_idx = np.where((meta_cells_chunk[batch_name] == uniq_batch).values)[0]
-        if len(batch_idx) == 0:
-            continue
-        counts_chunk_hk_batch = counts_chunk_hk[batch_idx, :].toarray()
-        counts_chunk_mito_batch = counts_chunk_mito[batch_idx]
-        libsize_batch = libsize[batch_idx]
-
-        counts_chunk_hk_batch_norm = np.log1p(counts_chunk_hk_batch/(libsize_batch[:, None] + 1e-4) * 10e4)
-        expr_batch_norm.loc[uniq_batch, :] = counts_chunk_hk_batch_norm.sum(axis = 0)
-
-        prop_chunk_mito_batch = counts_chunk_mito_batch/(libsize_batch + 1e-4)
-        prop_mito.loc[uniq_batch, "prop_mito"] = prop_chunk_mito_batch.sum(axis = 0)
-
-    print("Done.")
-    return {"expr": expr_batch_norm, "prop_mito": prop_mito}
-
 
 def calc_tech_features(batch_id):
     print(f"process batch {batch_id}...")
@@ -196,7 +128,7 @@ def calc_expr_features(partition_idx):
     print(f"processing partition {partition_idx}.")
 
     # construct batch_data
-    batch_data = pd.DataFrame(data = 0.0, index = batch_code[batch_name], columns = batch_info + gene_select)
+    batch_data = pd.DataFrame(data = 0.0, index = batch_code[batch_name], columns = batch_info + batch_gene_name)
     
     # extract libsize for normalization, more accurate: calculate the libsize from the data directly    
     meta_cells_chunk = pd.read_parquet(os.path.join(data_dir, f"obs_{partition_idx}_batchcode.parquet"))
@@ -209,15 +141,12 @@ def calc_expr_features(partition_idx):
     
     # NOTE: maybe calculate libsize, nnz, raw_mean_nnz all directly from data, summed features across all cells within the batch, need to divide by number of cells in the end
     expr_dict = batch_encode.construct_expr_feats(counts_raw = counts_chunk, batch_labels = np.array([x for x in meta_cells_chunk[batch_name].values]),
-                                                  batch_list = batch_code[batch_name], gene_name = full_gene, gene_select = gene_select)
+                                                  batch_list = batch_code[batch_name], gene_name = full_gene, gene_select = batch_gene_name)
 
-    expr_batch = expr_dict["expr"]
-    prop_mito = expr_dict["prop_mito"]
-    batch_stats = expr_dict["batch_stats"]
     # the returned value is sum
-    batch_data.loc[batch_stats.index, ["libsize", "nnz", "raw_mean_nnz", "num_cells"]] += batch_stats[["libsize", "nnz", "raw_mean_nnz", "ncells"]].values
-    batch_data.loc[prop_mito.index, ["prop_mito"]] += prop_mito.values
-    batch_data.loc[expr_batch.index, gene_select] += expr_batch[gene_select].values
+    batch_data.loc[expr_dict["batch_stats"].index, ["libsize", "nnz", "raw_mean_nnz", "num_cells"]] += expr_dict["batch_stats"][["libsize", "nnz", "raw_mean_nnz", "ncells"]].values
+    batch_data.loc[expr_dict["prop_mito"].index, ["prop_mito"]] += expr_dict["prop_mito"].values
+    batch_data.loc[expr_dict["expr"].index, batch_gene_name] += expr_dict["expr"][batch_gene_name].values
 
     print(f"Done {partition_idx}.")
     return batch_data    
@@ -228,14 +157,9 @@ print("generate batch features....")
 batch_name = "batch_level2" # level0 for ribo and stress selection
 tech_info = ["assay", "suspension_type"]
 batch_info = ["libsize", "nnz", "raw_mean_nnz", "prop_mito", "num_cells"]
-use_ribo_stress = True
-if use_ribo_stress:
-    gene_select = hk_gene_name + ribo_gene_name + stress_gene_name
-else:
-    gene_select = hk_gene_name
 
 print(f"Use the batch ver: {batch_name}, total number of batches: {len(batch_code[batch_name])}")
-batch_data = pd.DataFrame(index = batch_code[batch_name], columns = tech_info + batch_info + gene_select)
+batch_data_full = pd.DataFrame(index = batch_code[batch_name], columns = tech_info + batch_info + batch_gene_name)
 # In[]
 print("1. calculate batch-tech features....")
 # only select the useful information
@@ -246,33 +170,129 @@ with Pool(processes = 32) as pool:
     batch_tech_list = pool.starmap(calc_tech_features, args)
 batch_tech = pd.concat(batch_tech_list, axis = 0)
 # set the final value
-batch_data.loc[batch_tech.index, batch_tech.columns] = batch_tech.values
+batch_data_full.loc[batch_tech.index, batch_tech.columns] = batch_tech.values
 
 # In[]
 # read in the count matrix, of the same order as meta-cells
 print("2. calculate batch-expr features...")
 # init
-batch_data.loc[:, batch_info + gene_select] = 0.0
-# in case the progress lost
-batch_data.to_csv(f"feature_{batch_name}.csv")
+batch_data_full.loc[:, batch_info + batch_gene_name] = 0.0
 
-partitions = [(x,) for x in range(56)]
-with Pool(processes = 4) as pool:
-    results = pool.starmap(calc_expr_features, partitions)
+n_processes = 2
+results = []
+if n_processes == 1:
+    for partition in range(len(sizes)):
+        results.append(calc_expr_features(partition))
+else:
+    with Pool(processes = n_processes) as pool:
+        results = pool.starmap(calc_expr_features, [(x,) for x in range(len(sizes))])
 
-batch_data = pd.read_csv(f"feature_{batch_name}.csv", index_col = 0)
 for batch_expr in results:
-    batch_data.loc[batch_expr.index, batch_expr.columns] += batch_expr.values 
+    batch_data_full.loc[batch_expr.index, batch_expr.columns] += batch_expr.values 
 # average by number of cells
-batch_data[batch_info + gene_select] = batch_data[batch_info + gene_select].values/(batch_data["num_cells"].values[:,None] + 1e-4)
+batch_data_full[batch_info + batch_gene_name] = batch_data_full[batch_info + batch_gene_name].values/(batch_data_full["num_cells"].values.squeeze()[:,None] + 1e-4)
 
-batch_data.to_csv(f"feature_{batch_name}.csv")
+# batch_data_full.to_csv(res_dir + f"feature_{batch_name}.csv")
+batch_data_full.to_csv(f"feature_{batch_name}_validation.csv")
+
+# assert False
+# In[]
+# ---------------------------------------------------------------------------------------------
+#
+# Digitize the batch features
+#
+# ---------------------------------------------------------------------------------------------
+use_mito = True
+use_tech = False
+use_nmeasure = False
+batch_name = "batch_level2"
+expr_binsize = 1
+
+# need to provide full category or max continuous values
+# batch_data = pd.read_csv(f"feature_{batch_name}_filter.csv", index_col = 0)
+# key feature hard-coded already
+batch_data = pd.read_csv(res_dir + f"feature_{batch_name}.csv", index_col = 0)
+# ncells is irrelevant
+batch_data = batch_data.drop(["num_cells"], axis = 1)
+
+# old
+batch_data_cat, n_cat_list = batch_encode.tokenize_batch_feats(batch_data, use_mito = use_mito, use_tech = use_tech, use_nmeasure = use_nmeasure, expr_binsize = expr_binsize)
+
+
+batch_dict = {"state_dict_enc": None,
+              "state_dict_dec": None,
+              "n_cat_list": n_cat_list,
+              "n_cont_feats": 0, 
+              "cats": batch_data_cat, 
+              "conts": None
+              }
+
+file_name = f"batch_dict_{batch_name}"
+# if use_mito:
+#     file_name += "_mito"
+if use_tech:
+    file_name += "_tech"
+torch.save(batch_dict, data_dir + file_name + ".pt")
 
 
 # In[]
 # ---------------------------------------------------------------------------------------------
 #
-# Evaluate the feature importance
+# NOTE: New adaptive binning
+#
+# ---------------------------------------------------------------------------------------------
+# read in the batch dict 
+data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/"
+data_dir = "/data/zzhang834/hs_download/"
+batch_name = "level2"
+batch_feats = pd.read_csv(data_dir + f"meta_data/feature_batch_{batch_name}_filter.csv", index_col = 0)
+nbins = 10
+batch_feats_digitize_full, max_vals = batch_encode.tokenize_batch_feats(batch_feats = batch_feats, max_vals = None, nbins = nbins, normalize = True, margin = 0.0)
+# libsize already normalized
+batch_feats_digitize_full = batch_feats_digitize_full.drop(["libsize"], axis = 1)
+max_vals = max_vals[1:]
+for col in batch_feats_digitize_full.columns:
+    print(col)
+    uniq_val, uniq_count = np.unique(batch_feats_digitize_full[col].values.squeeze(), return_counts = True)
+    print(uniq_val)
+    # print(uniq_count)
+
+batch_dict_expr = {"state_dict_enc": None,
+                   "state_dict_dec": None,
+                   "n_cat_list": np.array([nbins] * batch_feats_digitize_full.shape[1]),
+                   "cat_maxvals": max_vals,
+                   "n_cont_feats": 0,
+                   "cats": batch_feats_digitize_full,
+                   "conts": None}
+torch.save(batch_dict_expr, data_dir + f"meta_data/batch_dict_{batch_name}_10.pt")
+
+# In[]
+# drop features related to genes
+batch_feats = batch_feats.drop(["assay", "suspension_type", "prop_mito", "raw_mean_nnz", "nnz", "libsize", "num_cells"], axis = 1)
+# only consider genes
+batch_feats_digitize, max_vals = batch_encode.tokenize_batch_gene(batch_feats = batch_feats, max_vals = None, margin = 0.1, nbins = nbins, normalize = True)
+
+
+for col in batch_feats_digitize.columns:
+    uniq_val, uniq_count = np.unique(batch_feats_digitize[col].values.squeeze(), return_counts = True)
+    print(uniq_val)
+    # print(uniq_count)
+
+batch_dict_expr = {"state_dict_enc": None,
+                   "state_dict_dec": None,
+                   "n_cat_list": np.array([nbins] * batch_feats_digitize.shape[1]),
+                   "cat_maxvals": max_vals,
+                   "n_cont_feats": 0,
+                   "cats": batch_feats_digitize,
+                   "conts": None}
+torch.save(batch_dict_expr, data_dir + f"meta_data/batch_dict_{batch_name}_expr10.pt")
+
+
+assert False
+# In[]
+# ---------------------------------------------------------------------------------------------
+#
+# Evaluate the feature importance [NOTE: analysis only run once]
 #
 # ---------------------------------------------------------------------------------------------
 # check the mean expression across batches, and the variance of expression across batches
@@ -280,7 +300,7 @@ batch_data.to_csv(f"feature_{batch_name}.csv")
 import matplotlib.pyplot as plt
 
 batch_name = "batch_level2"
-batch_data = pd.read_csv(f"feature_{batch_name}_ribo_stress.csv", index_col = 0)
+batch_data = pd.read_csv(f"feature_{batch_name}.csv", index_col = 0)
 batch_data_expr = batch_data[hk_gene_name + ribo_gene_name + stress_gene_name]
 
 batch_data_expr_digitize = batch_data_expr.copy()
@@ -393,39 +413,6 @@ batch_data_filter = batch_data[["assay", "suspension_type", "libsize", "nnz", "r
 batch_data_filter.to_csv(f"feature_{batch_name}_filter.csv")
 
 
-# In[]
-# ---------------------------------------------------------------------------------------------
-#
-# Digitize the batch features
-#
-# ---------------------------------------------------------------------------------------------
-use_mito = True
-use_tech = False
-use_nmeasure = False
-batch_name = "batch_level2"
-expr_binsize = 1
-
-# need to provide full category or max continuous values
-batch_data = pd.read_csv(f"feature_{batch_name}_filter.csv", index_col = 0)
-# ncells is irrelevant
-batch_data = batch_data.drop(["num_cells"], axis = 1)
-
-batch_data_cat, n_cat_list = batch_encode.tokenize_batch_feats(batch_data, use_mito = use_mito, use_tech = use_tech, use_nmeasure = use_nmeasure, expr_binsize = expr_binsize)
-
-batch_dict = {"state_dict_enc": None,
-              "state_dict_dec": None,
-              "n_cat_list": n_cat_list,
-              "n_cont_feats": 0, 
-              "cats": batch_data_cat, 
-              "conts": None
-              }
-
-file_name = f"batch_dict_{batch_name}"
-# if use_mito:
-#     file_name += "_mito"
-if use_tech:
-    file_name += "_tech"
-torch.save(batch_dict, file_name + ".pt")
 
 
 # In[]

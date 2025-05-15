@@ -8,12 +8,8 @@ try:
 
     flash_attn_available = True
 except ImportError:
-    import warnings
+    raise ValueError("flash attention is not correctly installed")
 
-    warnings.warn("flash_attn is not installed")
-    flash_attn_available = False
-
-print("flash_attn_available", flash_attn_available)
 
 class FlashTransformerLayer(nn.Module):
     def __init__(self, d_model: int, nhead: int, dim_feedforward: int, dropout: float, activation: str = "relu"):

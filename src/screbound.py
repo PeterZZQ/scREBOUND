@@ -136,45 +136,6 @@ class ConditionalPredictor(nn.Module):
             return {"mean": x_mean, "disp": x_disp}
         
 
-
-class gene_decompression(nn.Module):
-    def __init__(self, n_meta, n_layers, n_genes, mlm_type = "lognorm", dropout = 0.0):
-        super().__init__()
-
-        latent_dim = 512
-        self.mlm_type = mlm_type
-        
-        self.layers = nn.ModuleList()
-        if n_layers > 1:
-            self.layers.append(base_model.full_block(n_meta, latent_dim, p_drop = dropout))
-            for layer in range(1, n_layers - 1):
-                self.layers.append(base_model.full_block(latent_dim, latent_dim, p_drop = dropout))
-            self.layers.append(nn.Linear(latent_dim, n_genes))
-        else:
-            self.layers.append(nn.Linear(n_meta, n_genes))
-
-        if self.mlm_type == "lognorm":
-            self.gene_act = nn.Softplus()
-        elif self.mlm_type == "softmax":
-            self.gene_act = nn.Softmax(dim = -1)
-        elif self.mlm_type == "raw":
-            self.gene_act = nn.Softmax(dim = -1)
-            self.dispersion = nn.Sequential(nn.Linear(latent_dim, n_genes))
-        
-    def forward(self, x):
-        if len(self.layers) > 1:
-            for idx, layer in enumerate(self.layers[:-1]):
-                x = layer(x)
-
-        if self.mlm_type == "raw":
-            x_mean = self.gene_act(self.layers[-1](x))
-            x_disp = torch.exp(self.dispersion(x))
-            return {"mean": x_mean, "disp": x_disp}
-        else:
-            x = self.gene_act(self.layers[-1](x))
-            return {"mean": x}
-
-
 class TransformerModel(nn.Module):
 
     def __init__(self, token_dict: dict, batch_dict: dict, label_dict: dict, model_config: ModelConfig, device: torch.device, seed: int = 0):
@@ -209,6 +170,8 @@ class TransformerModel(nn.Module):
             self.batch_proj = nn.Sequential(nn.Linear(self.model_config.d_embed, self.cond_embed),
                                             nn.GELU(),
                                             nn.LayerNorm(self.cond_embed))
+        else:
+            self.cond_embed = 0
 
 
         # ------------------ genepool ------------------
@@ -225,11 +188,8 @@ class TransformerModel(nn.Module):
         for param in self.gene_compression.parameters():
             param.requires_grad = False
 
-        if (model_config.mlm_type != "meta") & (model_config.mlm_type != "raw-restart"):
-            self.gene_decompression = gene_decompression(n_meta = self.n_meta, n_layers = 2, n_genes = self.n_genes, mlm_type = model_config.mlm_type, dropout = 0.0)
-        else:
+        if self.model_config.mlm_type == "meta":
             self.mask_embed = nn.Parameter(torch.randn((1, self.model_config.d_embed)))
-            self.gene_decompression = nn.Identity()
         # ----------------------------------------------
 
         # gene name encoder, input: dimension of gene name embedding, token_dim
@@ -267,21 +227,13 @@ class TransformerModel(nn.Module):
                                      nn.Linear(self.model_config.d_embed, self.model_config.d_output))
 
 
-        if self.model_config.batch_enc is not None:
-            if self.model_config.mlm_type == "raw-restart":
-                self.expr_predictor_restart = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.cond_embed,
-                                                            output_dim = self.n_genes, n_layers = 6, dropout = self.model_config.dropout, deep_inj = True, nb_head = True)
-            else:                
-                self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.cond_embed,
-                                                        output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+        if self.model_config.mlm_type == "meta":
+            self.expr_predictor_meta = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.cond_embed,
+                                                    output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
                 
         else:
-            if self.model_config.mlm_type == "raw-restart":
-                self.expr_predictor_restart = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = 0,
-                                                            output_dim = self.n_genes, n_layers = 6, dropout = self.model_config.dropout, deep_inj = True, nb_head = True)
-            else:
-                self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = 0,
-                                                            output_dim = self.n_meta, n_layers = 4, dropout = self.model_config.dropout, deep_inj = True)
+            self.expr_predictor = ConditionalPredictor(input_dim = self.model_config.d_output, condition_dim = self.cond_embed,
+                                                        output_dim = self.n_genes, n_layers = 6, dropout = self.model_config.dropout, deep_inj = True, nb_head = True)
 
 
         self.label_dict = label_dict
@@ -291,13 +243,6 @@ class TransformerModel(nn.Module):
 
         if model_config.sup_type is not None:
             self.contrastive_label_mtx = self.calculate_contrastive_label()
-
-            # optionally. projection into contrastive space
-            if model_config.sup_type == "contrcb-proj":
-                self.project_contrastive = nn.Sequential(
-                    nn.Linear(self.model_config.d_output, self.model_config.d_output))      
-            else:
-                self.project_contrastive = None
         
         self.to(self.device)
 
@@ -329,11 +274,10 @@ class TransformerModel(nn.Module):
         return contr_label_matrix
 
 
-    def freeze_fm_gradient(self, freeze_trans: bool, freeze_predictor: bool, freeze_batchenc: bool, freeze_compression: bool):
+    def freeze_fm_gradient(self, freeze_trans: bool, freeze_batchenc: bool, freeze_compression: bool):
         self.compression_grad = not freeze_compression
         self.batchenc_grad = not freeze_batchenc
         self.trans_grad = not freeze_trans
-        self.predict_grad = not freeze_predictor
 
         if self.model_config.batch_enc is not None:
             for param in self.batch_encoder.parameters():
@@ -343,8 +287,10 @@ class TransformerModel(nn.Module):
 
         for param in self.gene_compression.parameters():
             param.requires_grad = self.compression_grad
-        for param in self.gene_decompression.parameters():
-            param.requires_grad = self.compression_grad
+        # the predictor is freeze and unfreeze following compression model
+        if self.model_config.mlm_type != "meta":
+            for param in self.expr_predictor.parameters():
+                param.requires_grad = self.compression_grad
 
         for param in self.transformer_encoder.parameters():
             param.requires_grad = self.trans_grad
@@ -357,14 +303,6 @@ class TransformerModel(nn.Module):
         if self.model_config.mlm_type == "meta":
             self.mask_embed.requires_grad = self.trans_grad
 
-        if self.model_config.mlm_type != "raw-restart":
-            for param in self.expr_predictor.parameters():
-                param.requires_grad = self.predict_grad
-        
-        else:
-            # the predictor is freeze and unfreeze following compression model
-            for param in self.expr_predictor_restart.parameters():
-                param.requires_grad = self.compression_grad
                 
 
     def forward(self, counts_norm: torch.Tensor):
@@ -422,7 +360,7 @@ class TransformerModel(nn.Module):
         return embed, cell_embed, mask_gene
 
 
-    def predict_expr(self, cell_embed: torch.Tensor, batch_factors: torch.Tensor, batch_ids: torch.Tensor):
+    def predict_expr(self, cell_embed: torch.Tensor, batch_factors: torch.Tensor):
 
         # incorporate the batch condition
         if self.model_config.batch_enc is not None:
@@ -432,12 +370,12 @@ class TransformerModel(nn.Module):
         else:
             batch_embed = None
         
-        if self.model_config.mlm_type != "raw-restart":
-            expr_pred_meta = self.expr_predictor(x = cell_embed, cond = batch_embed)
-            expr_pred = self.gene_decompression(expr_pred_meta)
+        if self.model_config.mlm_type == "meta":
+            expr_pred_meta = self.expr_predictor_meta(x = cell_embed, cond = batch_embed)
+            expr_pred = None
         else:
             expr_pred_meta = None
-            expr_pred = self.expr_predictor_restart(x = cell_embed, cond = batch_embed)
+            expr_pred = self.expr_predictor(x = cell_embed, cond = batch_embed)
         return expr_pred, expr_pred_meta
 
 

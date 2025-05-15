@@ -101,32 +101,19 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
     # all_embed, cell_embed, mask_gene = model(counts_norm = expr_sample, batch_factors_cont = batch_sample_cont, batch_factors_cat = batch_sample_cat, batch_ids = batch_sample_id)
     # expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors_cont = batch_sample_cont, batch_factors_cat = batch_sample_cat, batch_ids = batch_sample_id)
     all_embed, cell_embed, mask_gene = model(counts_norm = expr_sample)
-    expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors = batch_sample_cat, batch_ids = batch_sample_id)
+    expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors = batch_sample_cat)
 
     if model_acc.model_config.mlm_type == "meta":
         *_, expr_sample_meta = model_acc.gene_compression(gene_embed = model_acc.token_embed, expr = expr_sample, log_norm = True)
-        loss_mlm = ((expr_pred_meta - expr_sample_meta) * mask_gene).pow(2).sum(1).mean()
+        loss_mlm = (1/mask_gene.sum(1) * ((expr_pred_meta - expr_sample_meta) * mask_gene).pow(2).sum(1)).mean()
     
     else:
-        # NOTE: the mask here need to be on gene level
-        # use log-norm
-        norm = base_model.LogNormalization()
-        # used softmax output, so norm1 has to be True
-        if model_acc.model_config.mlm_type == "softmax":
-            norm_expr_sample = norm(expr_sample, norm_1 = True)
-            loss_mlm = ((expr_pred["mean"] - norm_expr_sample) * mask_gene).pow(2).sum(1).mean()
+        assert model_acc.model_config.lognorm_data == False
+        libsize = expr_sample.sum(1)
+        expr_pred_mean = expr_pred["mean"] * libsize[:, None]
+        expr_pred_disp = expr_pred["disp"]
 
-        elif model_acc.model_config.mlm_type == "lognorm":
-            norm_expr_sample = norm(expr_sample, norm_1 = False)
-            loss_mlm = ((expr_pred["mean"] - norm_expr_sample) * mask_gene).pow(2).sum(1).mean()
-
-        elif (model_acc.model_config.mlm_type == "raw") | (model_acc.model_config.mlm_type == "raw-restart"):
-            assert model_acc.model_config.lognorm_data == False
-            libsize = expr_sample.sum(1)
-            expr_pred_mean = expr_pred["mean"] * libsize[:, None]
-            expr_pred_disp = expr_pred["disp"]
-            # loss_mlm = - 1/model_acc.n_genes * base_model.log_nb_positive(x = expr_sample, mu = expr_pred_mean, theta = expr_pred_disp).sum(1).mean()
-            loss_mlm = - (1/mask_gene.sum(1) * (base_model.log_nb_positive(x = expr_sample, mu = expr_pred_mean, theta = expr_pred_disp) * mask_gene).sum(1)).mean()
+        loss_mlm = - (1/mask_gene.sum(1) * (base_model.log_nb_positive(x = expr_sample, mu = expr_pred_mean, theta = expr_pred_disp) * mask_gene).sum(1)).mean()
 
     # --------------------------------------------------------------------------------------------------------------------
     # add metric learning
@@ -150,9 +137,6 @@ def infer_databatch(model, data_sample, multigpus: bool = True):
         label_sample_id = label_sample_id[~unknown_samples]
         batch_label_contr = batch_label_contr[~unknown_samples]
 
-        if model_acc.project_contrastive is not None:
-            cell_embed = nn.functional.normalize(model_acc.project_contrastive(cell_embed))
-        
         loss_sup = contr(features = cell_embed, label_ids = label_sample_id, batch_ids = batch_label_contr)
 
     else:
@@ -285,7 +269,7 @@ def cell_impute(model, dataloader, multi_gpus = True, only_mean = True):
                 # all_embed, cell_embed, mask_gene = model(counts_norm = expr_sample, batch_factors_cont = batch_sample_cont, batch_factors_cat = batch_sample_cat, batch_ids = None)                    
                 # expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors_cont = batch_sample_cont, batch_factors_cat = batch_sample_cat, batch_ids = batch_sample_id)
                 all_embed, cell_embed, mask_gene = model(counts_norm = expr_sample)
-                expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors = batch_sample_cat, batch_ids = batch_sample_id)
+                expr_pred, expr_pred_meta = model_acc.predict_expr(cell_embed = cell_embed, batch_factors = batch_sample_cat)
 
                 # assert model_acc.model_config.mlm_type == "raw"
                 assert model_acc.model_config.lognorm_data == False

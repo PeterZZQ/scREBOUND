@@ -120,7 +120,7 @@ class sc_partition(data.Dataset):
 
 
 
-    def load_partition(self, idx, label_colname = None, batch_colname = None, data_prefix = "counts", meta_prefix = "obs"):
+    def load_partition(self, idx, label_colname = None, batch_colname = None, data_prefix = "counts", meta_prefix = "obs", save_memory = False):
         """\
         Description:
         -------------
@@ -157,6 +157,12 @@ class sc_partition(data.Dataset):
         self.expr_data = np.memmap(fname_expr_data, dtype = "float32", mode = "r", shape = (int(data_size), ))
         self.expr_indices = np.memmap(fname_expr_indices, dtype = "int16", mode = "r", shape = (int(indices_size), ))
         self.expr_indptr = np.memmap(fname_expr_indptr, dtype = "uint64", mode = "r", shape = (int(indptr_size), ))
+
+        if save_memory:
+            # save reading io but consume more memory
+            self.expr_data = np.array(self.expr_data)
+            self.expr_indices = np.array(self.expr_data)
+            self.expr_indptr = np.array(self.expr_indptr)
 
         self.batch_ids = meta_cells[batch_colname].values.squeeze()
 

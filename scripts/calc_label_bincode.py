@@ -45,7 +45,8 @@ print(ancestor_names)
 
 # In[]
 # read in the meta-data
-data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/permuted/"
+# data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/permuted/"
+data_dir = "/data/zzhang834/hs_healthy_2025_01_30/permuted/"
 sizes = np.loadtxt(data_dir + "sizes.txt")
 chunk_sizes = []
 meta_cells = []
@@ -69,7 +70,7 @@ bincode_table = pd.DataFrame(index = clid_code, columns = clid_code, data = 0)
 # In[]
 # write the label_id into meta-data, and save the code-book
 meta_cells["label_id"] = label_id
-meta_cells.drop(labels = ["batch_id"], axis = 1, inplace=True)
+# meta_cells.drop(labels = ["batch_id"], axis = 1, inplace=True)
 ptr = 0
 for cum_idx, chunk_size in enumerate(chunk_sizes):
     meta_cells_chunk = meta_cells.iloc[ptr:(chunk_size + ptr), :]
