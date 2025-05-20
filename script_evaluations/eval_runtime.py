@@ -28,7 +28,7 @@ for model_name in ["cp_contrcb1_6_512_256_encbg_level2_1", "scGPT", "UCE", "UCE_
     elif model_name == "UCE":
         model_name = "UCE-33LAYER"
     elif model_name == "geneformer":
-        model_name = "GeneFormer"
+        model_name = "Geneformer"
     runtime["method"] = model_name
     runtime_list.append(runtime)
 
@@ -49,13 +49,13 @@ runtime_list = pd.concat(runtime_list, axis = 0, ignore_index = 0)
 runtime_cum_list.loc[runtime_cum_list["method"] == "cp_contrcb1_6_512_256_encbg_level2_1", "method"] = "scREBOUND"
 runtime_list.loc[runtime_list["method"] == "cp_contrcb1_6_512_256_encbg_level2_1", "method"] = "scREBOUND"
 sns.set_theme(font_scale = 1.2)
-fig = plt.figure(figsize = (8,10))
+fig = plt.figure(figsize = (8,12))
 axs = fig.subplots(nrows = 3, ncols = 1)
 sns.lineplot(runtime_cum_list, x = "ncells", y = "runtime", hue = "method", style = "method", ax = axs[0], markers=True, markersize = 6)
 axs[0].set_ylabel("Runtime (sec)")
 axs[0].set_yscale("log")
 
-leg = axs[0].legend(loc='upper left', fontsize = 12, title_fontsize = 14, frameon = False, bbox_to_anchor=(1.04, 1), title = "Method")
+leg = axs[0].legend(loc='upper left', fontsize = 14, title_fontsize = 14, frameon = False, bbox_to_anchor=(1.04, 1), title = "Method")
 
 sns.barplot(runtime_list, x = "method", y = "runtime", ax = axs[1], width = 0.4)
 for container in axs[1].containers:

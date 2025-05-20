@@ -134,7 +134,7 @@ scores = []
 data_cases = ["immune_all", "lung_atlas", "pancreas", "covid19"]
 for data_case in data_cases:
     for model_name in model_dict_embed.keys():
-        if model_name == "scFoundation":
+        if model_name == "geneformer":
             continue
         score_dir = PROJECT_DIR + f"results/zs_annot/{model_name}/"
         score = pd.read_csv(score_dir + f"class_{data_case}_pca100.csv", index_col = 0)

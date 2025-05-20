@@ -82,7 +82,7 @@ sns.set_theme()
 use_pca = True
 scores_list = []
 for data_case in ["immune_all", "pancreas", "lung_atlas", "covid19"]:
-    for model_name in model_dict_contr.keys():
+    for model_name in model_dict_impute.keys():
         br_score_dir = PROJECT_DIR + f"results/zs_br/{model_name}/"
         if use_pca:
             scores = pd.read_csv(br_score_dir + f"scores_br_{data_case}_pca.csv", index_col = 0)
@@ -92,13 +92,13 @@ for data_case in ["immune_all", "pancreas", "lung_atlas", "covid19"]:
             scores = scores[scores["case"] == "total"]
             # assert False
         
-        scores["model"] = model_dict_contr[model_name]
+        scores["model"] = model_dict_impute[model_name]
         scores["data_case"] = data_case
         scores_list.append(scores)
 
 scores = pd.concat(scores_list, axis = 0, ignore_index = True)
 
-fig = plt.figure(figsize = (18, 4))
+fig = plt.figure(figsize = (22, 4))
 ax = fig.subplots(ncols = 3, nrows = 1)
 
 # for i, score in enumerate(["ari", "nmi", "asw", "asw (batch)"]):
@@ -130,18 +130,18 @@ scores = []
 data_cases = ["immune_all", "pancreas", "lung_atlas", "covid19"]
 for data_case in data_cases:
     # for model_name in model_dict.keys():
-    for model_name in model_dict_contr.keys():
+    for model_name in model_dict_impute.keys():
         score_dir = PROJECT_DIR + f"results/zs_annot/{model_name}/"
         score = pd.read_csv(score_dir + f"class_{data_case}_pca100.csv", index_col = 0)
 
-        score["model"] = model_dict_contr[model_name]
+        score["model"] = model_dict_impute[model_name]
         score["data_case"] = data_case
         scores.append(score)
 
 scores = pd.concat(scores, axis = 0, ignore_index = True)
 
 sns.set_theme()
-fig = plt.figure(figsize = (13, 5))
+fig = plt.figure(figsize = (17, 5))
 axs = fig.subplots(nrows = 1, ncols = 2)
 scores_sub = scores[scores["classifier"] == "knn_5"]
 for idx, metric in enumerate(["F1-score (weighted)", "accuracy"]):
@@ -160,7 +160,7 @@ fig.suptitle("Ablation: zero-shot cell type annotation (kNN)", fontsize = 20)
 plt.tight_layout() 
 fig.savefig(PROJECT_DIR + f"results/ablation/ablation_annot_knn_pca.png", bbox_inches = "tight")
 
-fig = plt.figure(figsize = (13, 5))
+fig = plt.figure(figsize = (17, 5))
 axs = fig.subplots(nrows = 1, ncols = 2)
 scores_sub = scores[scores["classifier"] == "svm"]
 for idx, metric in enumerate(["F1-score (weighted)", "accuracy"]):

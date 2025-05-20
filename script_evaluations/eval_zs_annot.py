@@ -213,15 +213,15 @@ label_dict = torch.load(data_dir + "meta_data/label_dict.pt", weights_only = Fal
 # 2. vanilla + contrastive
 # model_name = f"cp_contrcb1_mlm2_dyn_6_512_256_1"
 # TODO: 3. vanilla + restart
-model_name = f"cp_6_512_256_rawrestart_1"
+# model_name = f"cp_6_512_256_rawrestart_1"
 # TODO: 4. vanilla + contrastive + restart
-model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_rawrestart_1"
+# model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_rawrestart_1"
 
 # Baseline methods
 # model_name = "scGPT"
 # model_name = "scMulan"
 # model_name = "UCE"
-# model_name = "scFoundation"
+model_name = "scFoundation"
 res_dir = PROJECT_DIR + f"results/zs_annot/{model_name}/"
 train_embed_dir = res_dir + f"train_embed/"
 

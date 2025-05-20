@@ -58,6 +58,9 @@ def load_model(state, token_dict, label_dict, batch_dict, device, verbose = True
 
     return model
 
+PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
+data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/"
+
 # In[]
 # --------------------------------------------------------------------------
 #
@@ -72,9 +75,6 @@ device = torch.device("cuda")
 print(f"GPU - Using device: {device}")
 
 # NOTE: save in localscratch for faster memory access
-PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
-# data_dir = "/data/zzhang834/hs_download/"
-data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/"
 
 batch_name = "level2"
 # old model best
@@ -210,6 +210,21 @@ for partition_idx in range(dataset_dict["num_partitions"]):
     adata.obs["batch_id"] = meta_cell_idx[dataset_dict["batch_colname"]].values.squeeze()
 
     adata.write_h5ad(res_dir + f"embed_model_{partition_idx}.h5ad")
+
+
+# In[]
+# NOTE: scfoundation train embedding
+res_dir = PROJECT_DIR + f"results/zs_annot/scFoundation/train_embed/"
+if not os.path.exists(res_dir):
+    os.makedirs(res_dir)
+scfoundation_dir = "/net/csefiles/xzhanglab/shared/foundation_evaluation/data/trainset_select/scFoundation/"
+
+for partition_idx in range(dataset_dict["num_partitions"]):
+    meta_cell_idx = pd.read_parquet(dataset_dict["DIR"] + f"{dataset_dict["meta_prefix"]}_{partition_idx}_batchcode.parquet")
+    adata = anndata.read_h5ad(scfoundation_dir + f"partition_{partition_idx}.h5ad")
+    adata_embed = anndata.AnnData(X = adata.obsm["X_scFoundation"].toarray())
+    adata_embed.obs = adata.obs
+    adata_embed.write_h5ad(res_dir + f"embed_model_{partition_idx}.h5ad")
 
 # In[]
 # ------------------------------------------------------------------------

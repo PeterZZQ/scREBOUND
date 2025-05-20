@@ -7,7 +7,7 @@ import torch
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
-sys.path.append("/net/csefiles/xzhanglab/zzhang834/LLM_KD/src")
+sys.path.append("/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/src")
 
 import data_utils
 # from transformer_batch import TransformerModel, get_default_config
@@ -24,7 +24,7 @@ def initialize_services(log_dir):
 
 # In[]
 data_utils.set_seed(0)
-PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
+PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/"
 data_dir = "/data/zzhang834/hs_download/"
 # Define the device
 assert torch.cuda.is_available(), "Training on CPU is not supported"
@@ -42,7 +42,7 @@ PRECISION = torch.float32
 batch_name = "level2"
 
 # no batch
-model_name = f"cp_6_512_256_meta_1"
+model_name = f"cp_6_512_128_meta_1"
 PRETRAIN_MODEL = PROJECT_DIR + "screbound/" + model_name + ".pth"
 
 state = torch.load(PRETRAIN_MODEL, weights_only = False)
@@ -54,13 +54,13 @@ model_config.__dict__.update({"batch_size": batch_size,
                               "mask_prob": 0.4,
                               "dynamic_maskprob": False,
                               "mlm_type": "raw",
-                              "lamb_mlm": 10,
+                              "lamb_mlm": 100,
                               "lamb_mincut": 1,
                               "sup_type": None,
                               "lamb_sup": 0,
                               "precision": PRECISION,
                               "checkpoint_path": PROJECT_DIR + "screbound/",
-                              "checkpoint_prefix": f"cp_6_512_256",
+                              "checkpoint_prefix": f"cp_6_512_128",
                               "lognorm_data": False
                             })
 

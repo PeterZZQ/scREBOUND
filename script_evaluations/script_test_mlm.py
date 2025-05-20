@@ -20,14 +20,13 @@ import torch
 from torch.utils import data
 from torch.amp import autocast
 
-sys.path.append("/net/csefiles/xzhanglab/zzhang834/LLM_KD/src")
-sys.path.append("/net/csefiles/xzhanglab/zzhang834/LLM_KD/batch_encoding")
+sys.path.append("/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/src")
+sys.path.append("/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/batch_encoding")
 
 import data_utils
 from transformer_batch import TransformerModel, get_default_config
-# from transformer_stable import TransformerModel, get_default_config
-
 import trainer_batch as trainer_batch
+
 import utils
 # import eval
 import batch_encode 
@@ -107,7 +106,7 @@ device = torch.device("cuda")
 print(f"GPU - Using device: {device}")
 
 # NOTE: save in localscratch for faster memory access
-PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/"
+PROJECT_DIR = "/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/"
 data_dir = "/net/csefiles/xzhanglab/zzhang834/hs_download/"
 batch_name = "level2"
 
@@ -117,46 +116,23 @@ batch_name = "level2"
 
 # new batch encoder model
 # 1. batch encoder
-# model_name = f"cp_6_512_256_concat_full_1"
-# 2. batch encoder + contrastive
-# model_name = f"cp_contrcb1_6_512_256_concat_full_1"
-# 3. batch encoder + restart
 # model_name = f"cp_6_512_256_concat_rawrestart_1"
-# 4. batch encoder + contrastive + restart
-# model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_concat_rawrestart_1"
-# model_dir = PROJECT_DIR + f"checkpoint/model_6_256_concat_full/{model_name}.pth"
+# 2. batch encoder + contrastive
+model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_concat_rawrestart_1"
+model_dir = PROJECT_DIR + f"checkpoint/model_6_256_concat_full/{model_name}.pth"
 
 # new vanilla model
-# 1. vanilla
-# model_name = f"cp_6_512_256_1"
-# 2. vanilla + contrastive
-# model_name = f"cp_contrcb1_mlm2_dyn_6_512_256_1"
-# TODO: 3. vanilla + restart
+# TODO: 1. vanilla
 # model_name = f"cp_6_512_256_rawrestart_1"
-# TODO: 4. vanilla + contrastive + restart
-model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_rawrestart_1"
-model_dir = PROJECT_DIR + f"checkpoint/model_6_256_nobatch/{model_name}.pth"
+# TODO: 2. vanilla + contrastive
+# model_name = f"cp_contrcb1_mlm10_dyn_6_512_256_rawrestart_1"
+# model_dir = PROJECT_DIR + f"checkpoint/model_6_256_nobatch/{model_name}.pth"
 
 state = torch.load(model_dir, weights_only = False)
 
 token_dict = torch.load(data_dir + f"meta_data/gene_embed_meta256_gpool.pt", weights_only = False)
 label_dict = torch.load(data_dir + f"meta_data/label_dict.pt", weights_only = False)
-# ------------------------------------------------------------------------------------------------------------------------------------
-# batch_dict = torch.load(data_dir + f"meta_data/batch_dict_batch_{batch_name}.pt", weights_only = False)
-# # drop the stats features (not very useful)
-# batch_dict["cats"] = batch_dict["cats"].drop(["prop_mito", "raw_mean_nnz", "nnz", "libsize"], axis = 1)
-# batch_dict["n_cat_list"] = batch_dict["n_cat_list"][4:]
-
-# make value continuous
-# batch_feats = pd.read_csv(data_dir + f"meta_data/feature_batch_level2_filter.csv", index_col = 0)
-# batch_dict["cats"] = batch_feats[batch_dict["cats"].columns]
-
-# new full list
 batch_dict = torch.load(data_dir + f"meta_data/batch_dict_{batch_name}_10.pt", weights_only = False)
-
-# # new adaptive
-# batch_dict = torch.load(data_dir + f"meta_data/batch_dict_{batch_name}_expr10.pt", weights_only = False)
-# ------------------------------------------------------------------------------------------------------------------------------------
 batch_dict["cats"] = torch.tensor(batch_dict["cats"].values)
 
 model_pretrain = load_model(state = state, token_dict = token_dict, label_dict = label_dict, batch_dict = batch_dict, device = device)
@@ -167,16 +143,16 @@ if not os.path.exists(res_dir):
 
 # In[]
 # selection of test dataset
-data_case = "immune_all"
-data_case = "pancreas"
-data_case = "lung_atlas"
+# data_case = "immune_all"
+# data_case = "pancreas"
+# data_case = "lung_atlas"
 data_case = "covid19"
 # data_case = "GBM"
 
 if data_case != "covid19":
-    EVAL_DATA_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/dataset/scIB/"
+    EVAL_DATA_DIR = "/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/dataset/scIB/"
 else:
-    EVAL_DATA_DIR = "/net/csefiles/xzhanglab/zzhang834/LLM_KD/dataset/evaluation_datasets/"
+    EVAL_DATA_DIR = "/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/dataset/evaluation_datasets/"
 
 adata_test = anndata.read_h5ad(EVAL_DATA_DIR + f"{data_case}_aligned.h5ad")
 
@@ -226,9 +202,15 @@ adata_embed.obsm["latent"] = adata_embed.X.copy()
 adata_embed.write_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
 # In[]
 adata_embed = anndata.read_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
+# embed_scvi = True
+# if embed_scvi:
+#     import scvi
+#     adata_embed.obsm["X_umap"] = scvi.model.utils.mde(adata_embed.obsm["latent"], accelerator = "gpu", seed = 0)
+# else:
 
 sc.pp.neighbors(adata_embed, n_neighbors = 30, use_rep = "latent")
-sc.tl.umap(adata_embed, min_dist = 0.5)
+sc.tl.umap(adata_embed, min_dist = 0.7)
+
 adata_embed.obsm[f"X_umap_latent"] = adata_embed.obsm["X_umap"].copy()
 del adata_embed.obsm["X_umap"]
 
