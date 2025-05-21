@@ -18,15 +18,3 @@ flash-attn == 2.7.4.post1
 * `./script_train/` stores the training scripts for scREBOUND
 * `./src/` stores the source code of scREBOUND
 
-## Usage
-```bash
-python script_infer.py --config [config_file.yaml]
-```
-
-The `config_file.yaml` stores the configuration of the inference, which include the key parameters:
-* seed: the random seed
-* device: running device
-* model_dir: the directory of the model state dict
-* data_dir: the directory of the evaluation dataset
-* output_dir: the output directory
-See `config_pancreas.ymal` for the example setting on pancreas evaluation dataset.
