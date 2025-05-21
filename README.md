@@ -14,7 +14,6 @@ flash-attn == 2.7.4.post1
 
 ## Directory
 * `./batch_encoding/` stores the batch preprocessing script for training data 
-* `./dataset/` stores the evaluation dataset 
 * `./script_evaluation/` stores evaluation script of scREBOUND and baseline models
 * `./script_train/` stores the training scripts for scREBOUND
 * `./src/` stores the source code of scREBOUND
