@@ -21,7 +21,6 @@ from torch.utils import data
 from torch.amp import autocast
 
 sys.path.append("/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/src")
-sys.path.append("/net/csefiles/xzhanglab/zzhang834/scREBOUND_test/batch_encoding")
 
 import data_utils
 from transformer_batch import TransformerModel, get_default_config
@@ -143,10 +142,10 @@ if not os.path.exists(res_dir):
 
 # In[]
 # selection of test dataset
-# data_case = "immune_all"
-# data_case = "pancreas"
+data_case = "immune_all"
+data_case = "pancreas"
 # data_case = "lung_atlas"
-data_case = "covid19"
+# data_case = "covid19"
 # data_case = "GBM"
 
 if data_case != "covid19":
@@ -202,14 +201,15 @@ adata_embed.obsm["latent"] = adata_embed.X.copy()
 adata_embed.write_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
 # In[]
 adata_embed = anndata.read_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
+# adata_embed.obs["batch_id"] = adata_embed.obs["tech"].values
 # embed_scvi = True
 # if embed_scvi:
 #     import scvi
 #     adata_embed.obsm["X_umap"] = scvi.model.utils.mde(adata_embed.obsm["latent"], accelerator = "gpu", seed = 0)
 # else:
 
-sc.pp.neighbors(adata_embed, n_neighbors = 30, use_rep = "latent")
-sc.tl.umap(adata_embed, min_dist = 0.7)
+sc.pp.neighbors(adata_embed, n_neighbors = 50, use_rep = "latent")
+sc.tl.umap(adata_embed, min_dist = 0.5)
 
 adata_embed.obsm[f"X_umap_latent"] = adata_embed.obsm["X_umap"].copy()
 del adata_embed.obsm["X_umap"]
