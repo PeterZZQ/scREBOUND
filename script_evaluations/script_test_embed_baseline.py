@@ -107,7 +107,9 @@ for data_case in ["immune_all", "lung_atlas", "pancreas", "covid19"]:
 data_case = "pancreas"
 # res_dir = res_dir_scgpt
 # res_dir = res_dir_scmulan
-res_dir = res_dir_scfoundation
+# res_dir = res_dir_scfoundation
+res_dir = res_dir_uce
+
 adata_embed = anndata.read_h5ad(res_dir + f"adata_embed_{data_case}.h5ad")
 adata_embed.obs["batch_id"] = adata_embed.obs["batch"].values
 if data_case == "lung_atlas":
